@@ -16,6 +16,7 @@
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
   .row label { color:var(--mute); }
   input[type=range] { flex:1; min-width:120px; accent-color:var(--accent); }
+  select { font:inherit; background:#2c2f36; color:var(--fg); border:1px solid #3a3e46; border-radius:7px; padding:6px 8px; }
   button { font:inherit; border:0; border-radius:7px; padding:9px 14px; cursor:pointer; background:#2c2f36; color:var(--fg); }
   button.primary { background:var(--accent); color:#1b1408; font-weight:600; }
   button:disabled { opacity:.45; cursor:default; }
@@ -43,6 +44,16 @@
     <label for="scale">Board size</label>
     <input id="scale" type="range" min="0.7" max="1.6" step="0.05">
     <span id="scaleVal"></span>
+  </div>
+  <div class="row">
+    <label for="diff">Difficulty</label>
+    <select id="diff">
+      <option value="easiest">Easiest (−600)</option>
+      <option value="easier">Easier (−300)</option>
+      <option value="normal">Normal</option>
+      <option value="harder">Harder (+300)</option>
+      <option value="hardest">Hardest (+600)</option>
+    </select>
   </div>
   <p>In VR: pinch a piece to pick it up, release over a square to move. Poke the keys on the table with your index finger. ◀ ▶ step through the moves. On desktop, use the arrow keys.</p>
 </div>
@@ -74,7 +85,13 @@ const store = {
   set token(v) { try { v ? localStorage.setItem('lp_token', v) : localStorage.removeItem('lp_token'); } catch {} },
   get scale() { try { return parseFloat(localStorage.getItem('lp_scale')); } catch { return NaN; } },
   set scale(v) { try { localStorage.setItem('lp_scale', String(v)); } catch {} },
+  get diff() { try { return localStorage.getItem('lp_diff'); } catch { return null; } },
+  set diff(v) { try { localStorage.setItem('lp_diff', v); } catch {} },
 };
+// Lichess applies the website difficulty setting only on lichess.org; API requests must pass it.
+const DIFFS = ['easiest', 'easier', 'normal', 'harder', 'hardest'];
+const DIFF_LABEL = { easiest:'Easiest −600', easier:'Easier −300', normal:'Normal', harder:'Harder +300', hardest:'Hardest +600' };
+let difficulty = DIFFS.includes(store.diff) ? store.diff : 'easiest';
 const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const randStr = n => b64url(crypto.getRandomValues(new Uint8Array(n)));
 
@@ -129,7 +146,7 @@ function refreshUserUI() {
 let queue = [];
 async function nextPuzzleData() {
   if (queue.length === 0) {
-    const data = await api('/api/puzzle/batch/mix?nb=10');
+    const data = await api(`/api/puzzle/batch/mix?nb=10&difficulty=${difficulty}`);
     queue = data.puzzles || [];
     if (!queue.length) throw new Error('No puzzles returned.');
   }
@@ -515,7 +532,7 @@ function drawInfo() {
   g.font = '34px system-ui,sans-serif'; g.fillStyle = '#c9c5bb';
   if (P.data) {
     const pz = P.data.puzzle;
-    g.fillText(`Puzzle ${pz.id} · rated ${pz.rating}`, 40, 112);
+    g.fillText(`Puzzle ${pz.id} · rated ${pz.rating} · ${DIFF_LABEL[difficulty]}`, 40, 112, W - 80);
     g.fillStyle = '#9a978f'; g.font = '28px system-ui,sans-serif';
     g.fillText(pz.themes.slice(0, 5).join(' · '), 40, 160, W - 80);
   }
@@ -562,6 +579,7 @@ makeKey('Lower', 1, 0, 0.165, () => adjustHeight(-0.03));
 // Left column
 makeKey('◀', -1, -0.0275, -0.07, () => navBack(), 0.047, 0.07);
 makeKey('▶', -1, 0.0275, -0.07, () => navFwd(), 0.047, 0.07);
+makeKey('Level', -1, 0, 0.02, () => setDifficulty(DIFFS[(DIFFS.indexOf(difficulty) + 1) % DIFFS.length], true));
 makeKey('Board +', -1, 0, 0.1, () => applyScale(boardScale + SCALE_STEP, true));
 makeKey('Board −', -1, 0, 0.165, () => applyScale(boardScale - SCALE_STEP, true));
 
@@ -589,6 +607,17 @@ function applyScale(s, sound = false) {
 }
 $('scale').addEventListener('input', e => applyScale(+e.target.value));
 applyScale(boardScale);
+
+/* ============================== Difficulty ============================== */
+// Takes effect from the next puzzle: the queued batch is discarded.
+function setDifficulty(d, fromVR = false) {
+  difficulty = d; store.diff = d; queue = [];
+  $('diff').value = d;
+  if (fromVR) click(700);
+  flash(`Difficulty: ${DIFF_LABEL[d]}. Applies from the next puzzle.`);
+}
+$('diff').value = difficulty;
+$('diff').addEventListener('change', e => setDifficulty(e.target.value));
 
 /* ============================== Move navigation ============================== */
 let navBusy = false;

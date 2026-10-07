@@ -29,6 +29,7 @@ Left of the board:
 | Action | How |
 |---|---|
 | Step through moves | **◀** / **▶**. Works during and after the puzzle. While reviewing, pieces are locked; poke ▶ back to the current position to keep playing. |
+| Difficulty | **Level** cycles Easiest (−600) → Easier (−300) → Normal → Harder (+300) → Hardest (+600). The panel shows the current level. Applies from the next puzzle. The setting is saved. |
 | Board size | **Board +** / **Board −**, 10% per poke, 70%–160%. The setting is saved. |
 
 Re-center: hold the Meta button, or exit and re-enter VR to re-place the table.
@@ -40,6 +41,7 @@ Tournament Staunton proportions: king 1.7× the square height, base about 70% of
 ## Rating rules
 
 - Puzzles come from `/api/puzzle/batch/mix`; logged in, you only get puzzles you have not seen.
+- Difficulty is set in the app, not on lichess.org. The website's puzzle difficulty setting does not apply to API requests. Offsets are relative to your puzzle rating. Default is Easiest.
 - The first wrong move records a loss immediately, as on lichess.org. You can keep playing to finish.
 - A clean solve records a win. Your new puzzle rating and the change show on the panel.
 - Any mating move is accepted on the final move, as on lichess.org.
@@ -47,4 +49,4 @@ Tournament Staunton proportions: king 1.7× the square height, base about 70% of
 
 ## Desktop testing
 
-The same page works on a PC: drag pieces with the mouse, orbit with right-drag or left-drag on empty space, click the keys. Arrow keys step through moves. The **Board size** slider sits in the top-left panel.
+The same page works on a PC: drag pieces with the mouse, orbit with right-drag or left-drag on empty space, click the keys. Arrow keys step through moves. The **Board size** slider and **Difficulty** menu sit in the top-left panel.
