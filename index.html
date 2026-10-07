@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VR Lichess Puzzles</title>
+<style>
+  :root { --bg:#14161a; --fg:#e9e6df; --mute:#9a978f; --accent:#d9a441; --ok:#5fb36b; --bad:#d9574b; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; overflow:hidden; }
+  #c { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #ui { position:fixed; left:16px; top:16px; max-width:360px; background:rgba(20,22,26,.88); border:1px solid #2c2f36; border-radius:10px; padding:14px 16px; }
+  #ui h1 { font-size:17px; margin:0 0 6px; }
+  #ui p { margin:6px 0; color:var(--mute); }
+  #user { color:var(--fg); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  button { font:inherit; border:0; border-radius:7px; padding:9px 14px; cursor:pointer; background:#2c2f36; color:var(--fg); }
+  button.primary { background:var(--accent); color:#1b1408; font-weight:600; }
+  button:disabled { opacity:.45; cursor:default; }
+  #status { color:var(--fg); }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>VR Lichess Puzzles</h1>
+  <p id="user">Not logged in</p>
+  <p id="status">Loading…</p>
+  <div class="row">
+    <button id="login" class="primary">Log in with Lichess</button>
+    <button id="logout" hidden>Log out</button>
+    <button id="vr" class="primary" disabled>Enter VR</button>
+  </div>
+  <p>In VR: pinch a piece to pick it up, release over a square to move. Poke the keys on the table with your index finger.</p>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+import { Chess } from 'https://cdn.jsdelivr.net/npm/chess.js@1.4.0/+esm';
+
+/* ============================== Config ============================== */
+const LICHESS = 'https://lichess.org';
+const CLIENT_ID = 'vr-lichess-puzzles';
+const REDIRECT = location.origin + location.pathname;
+const SQ = 0.065;                 // square size, metres
+const HALF = SQ * 4;
+const PIECE_SCALE = 0.024;        // base radius of pieces, metres
+const PINCH_ON = 0.022, PINCH_OFF = 0.04;
+const GRAB_RADIUS = 0.05;
+
+/* ============================== 2D UI ============================== */
+const $ = id => document.getElementById(id);
+const setStatus = t => { $('status').textContent = t; };
+
+/* ============================== Lichess auth (OAuth PKCE) ============================== */
+const store = {
+  get token() { try { return localStorage.getItem('lp_token'); } catch { return null; } },
+  set token(v) { try { v ? localStorage.setItem('lp_token', v) : localStorage.removeItem('lp_token'); } catch {} },
+};
+const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const randStr = n => b64url(crypto.getRandomValues(new Uint8Array(n)));
+
+async function login() {
+  const verifier = randStr(48), state = randStr(12);
+  const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+  sessionStorage.setItem('lp_verifier', verifier);
+  sessionStorage.setItem('lp_state', state);
+  const q = new URLSearchParams({ response_type:'code', client_id:CLIENT_ID, redirect_uri:REDIRECT,
+    code_challenge_method:'S256', code_challenge:challenge, scope:'puzzle:read puzzle:write', state });
+  location.href = `${LICHESS}/oauth?${q}`;
+}
+
+async function finishLogin() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('code') && !q.has('error')) return;
+  history.replaceState(null, '', REDIRECT);
+  if (q.get('error')) { setStatus('Login cancelled.'); return; }
+  if (q.get('state') !== sessionStorage.getItem('lp_state')) { setStatus('Login failed: state mismatch.'); return; }
+  const res = await fetch(`${LICHESS}/api/token`, { method:'POST', body:new URLSearchParams({
+    grant_type:'authorization_code', code:q.get('code'), code_verifier:sessionStorage.getItem('lp_verifier'),
+    redirect_uri:REDIRECT, client_id:CLIENT_ID }) });
+  if (!res.ok) { setStatus(`Login failed (${res.status}).`); return; }
+  store.token = (await res.json()).access_token;
+}
+
+async function api(path, opts = {}) {
+  const headers = { Accept:'application/json', ...(opts.headers || {}) };
+  if (store.token) headers.Authorization = `Bearer ${store.token}`;
+  const res = await fetch(LICHESS + path, { ...opts, headers });
+  if (res.status === 401) { store.token = null; refreshUserUI(); throw new Error('Session expired. Log in again.'); }
+  if (res.status === 429) throw new Error('Rate limited by Lichess. Wait a minute.');
+  if (!res.ok) throw new Error(`Lichess error ${res.status}`);
+  return res.json();
+}
+
+let account = null;   // { username, rating }
+async function loadAccount() {
+  if (!store.token) { account = null; return; }
+  const a = await api('/api/account');
+  account = { username: a.username, rating: a.perfs?.puzzle?.rating ?? null };
+}
+
+function refreshUserUI() {
+  $('user').textContent = account ? `${account.username} · puzzle rating ${account.rating ?? '?'}` : 'Not logged in (puzzles will not be rated)';
+  $('login').hidden = !!store.token;
+  $('logout').hidden = !store.token;
+  drawInfo();
+}
+
+/* ============================== Puzzle queue ============================== */
+let queue = [];
+async function nextPuzzleData() {
+  if (queue.length === 0) {
+    const data = await api('/api/puzzle/batch/mix?nb=10');
+    queue = data.puzzles || [];
+    if (!queue.length) throw new Error('No puzzles returned.');
+  }
+  return queue.shift();
+}
+
+async function submitResult(id, win) {
+  if (!store.token) return null;
+  const before = account?.rating;
+  try {
+    const r = await api('/api/puzzle/batch/mix?nb=0', { method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ solutions:[{ id, win, rated:true }] }) });
+    let diff = r?.rounds?.[0]?.ratingDiff;
+    await loadAccount();
+    if (diff == null && before != null && account?.rating != null) diff = account.rating - before;
+    refreshUserUI();
+    return diff;
+  } catch (e) { flash(e.message); return null; }
+}
+
+/* ============================== Three.js scene ============================== */
+const canvas = $('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.xr.enabled = true;
+renderer.xr.setFoveation(1);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 100);
+camera.position.set(0, 1.45, 0.25);
+const orbit = new OrbitControls(camera, canvas);
+orbit.target.set(0, 0.85, -0.5);
+orbit.enableDamping = true;
+orbit.update();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// --- Environment: library-style room at dusk
+{
+  const skyGeo = new THREE.SphereGeometry(40, 32, 16);
+  const skyMat = new THREE.ShaderMaterial({ side:THREE.BackSide, depthWrite:false, uniforms:{
+      top:{ value:new THREE.Color(0x1d2433) }, mid:{ value:new THREE.Color(0x4a3d3a) }, bot:{ value:new THREE.Color(0x15161a) } },
+    vertexShader:'varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }',
+    fragmentShader:'uniform vec3 top,mid,bot; varying vec3 vP; void main(){ float h=vP.y; vec3 c = h>0.? mix(mid,top,smoothstep(0.,.6,h)) : mix(mid,bot,smoothstep(0.,.25,-h)); gl_FragColor=vec4(c,1.); }' });
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+  const floor = new THREE.Mesh(new THREE.CircleGeometry(12, 64), new THREE.MeshStandardMaterial({ color:0x3a2c22, roughness:.85 }));
+  floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+  const rug = new THREE.Mesh(new THREE.CircleGeometry(1.6, 48), new THREE.MeshStandardMaterial({ color:0x5b2a2a, roughness:1 }));
+  rug.rotation.x = -Math.PI / 2; rug.position.set(0, 0.002, -0.4); rug.receiveShadow = true; scene.add(rug);
+
+  // distant bookshelves ring
+  const shelfMat = new THREE.MeshStandardMaterial({ color:0x2b1f17, roughness:.9 });
+  const bookCols = [0x7a2e2e, 0x2e4a7a, 0x3d6b3d, 0x8a6a2e, 0x5a3d6b, 0x6b6b6b];
+  for (let i = 0; i < 14; i++) {
+    const a = (i / 14) * Math.PI * 2;
+    const g = new THREE.Group();
+    g.add(Object.assign(new THREE.Mesh(new THREE.BoxGeometry(1.8, 2.6, 0.4), shelfMat), { position:new THREE.Vector3(0, 1.3, 0) }));
+    for (let s = 0; s < 5; s++) for (let b = 0; b < 12; b++) {
+      const h = 0.3 + Math.random() * 0.12;
+      const book = new THREE.Mesh(new THREE.BoxGeometry(0.11, h, 0.05),
+        new THREE.MeshStandardMaterial({ color:bookCols[(i * 7 + s * 3 + b) % bookCols.length], roughness:.8 }));
+      book.position.set(-0.75 + b * 0.135, 0.2 + s * 0.5 + h / 2, 0.21);
+      g.add(book);
+    }
+    g.position.set(Math.sin(a) * 6, 0, Math.cos(a) * 6);
+    g.lookAt(0, 0, 0);
+    scene.add(g);
+  }
+
+  scene.add(new THREE.HemisphereLight(0xfff1dc, 0x2a2018, 0.9));
+  const lamp = new THREE.DirectionalLight(0xffe7c4, 2.2);
+  lamp.position.set(0.6, 1.8, 0.8);
+  lamp.target.position.set(0, 0, 0);
+  lamp.castShadow = true;
+  lamp.shadow.mapSize.set(1024, 1024);
+  Object.assign(lamp.shadow.camera, { left:-0.6, right:0.6, top:0.6, bottom:-0.6, near:0.5, far:4 });
+  lamp.shadow.bias = -0.0005;
+  window.__lamp = lamp;
+}
+
+// --- Table group: origin at centre of board surface. Board group rotates for black.
+const table = new THREE.Group();
+table.position.set(0, 0.85, -0.5);
+scene.add(table);
+table.add(window.__lamp, window.__lamp.target);
+const board = new THREE.Group();
+table.add(board);
+
+const wood = new THREE.MeshStandardMaterial({ color:0x5a3a22, roughness:.6 });
+const tableTop = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.04, 0.72), wood);
+tableTop.position.y = -0.03; tableTop.receiveShadow = true; table.add(tableTop);
+const legs = [];
+for (const [x, z] of [[-.45, -.31], [.45, -.31], [-.45, .31], [.45, .31]]) {
+  const leg = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1, 0.05), wood);
+  leg.userData.xz = [x, z]; legs.push(leg); table.add(leg);
+}
+function layoutLegs() {
+  const h = table.position.y - 0.05;
+  for (const leg of legs) { leg.scale.y = h; leg.position.set(leg.userData.xz[0], -0.05 - h / 2, leg.userData.xz[1]); }
+}
+layoutLegs();
+
+// Board surface with coordinates (redrawn on flip so labels read correctly)
+const boardCanvas = document.createElement('canvas');
+boardCanvas.width = boardCanvas.height = 1024;
+const boardTex = new THREE.CanvasTexture(boardCanvas);
+boardTex.colorSpace = THREE.SRGBColorSpace;
+boardTex.anisotropy = 8;
+const MARGIN = 0.022;
+const boardSize = SQ * 8 + MARGIN * 2;
+const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(boardSize, 0.012, boardSize),
+  [wood, wood, new THREE.MeshStandardMaterial({ map:boardTex, roughness:.55 }), wood, wood, wood]);
+boardMesh.position.y = -0.006; boardMesh.receiveShadow = true;
+board.add(boardMesh);
+
+function drawBoard(flipped) {
+  const g = boardCanvas.getContext('2d'), N = 1024;
+  const m = N * MARGIN / boardSize, s = (N - 2 * m) / 8;
+  g.fillStyle = '#3b2616'; g.fillRect(0, 0, N, N);
+  for (let r = 0; r < 8; r++) for (let f = 0; f < 8; f++) {
+    g.fillStyle = (r + f) % 2 ? '#b58863' : '#f0d9b5';
+    // canvas row 0 is far edge (rank 8 for white). Board group rotation handles black.
+    g.fillRect(m + f * s, m + (7 - r) * s, s, s);
+  }
+  g.fillStyle = '#e8d6b8'; g.font = `bold ${Math.round(m * 0.62)}px system-ui,sans-serif`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (let i = 0; i < 8; i++) {
+    const file = 'abcdefgh'[i], rank = String(i + 1);
+    // labels are drawn rotated 180° when the board group is rotated, so they face the player
+    const put = (txt, x, y) => { g.save(); g.translate(x, y); if (flipped) g.rotate(Math.PI); g.fillText(txt, 0, 0); g.restore(); };
+    put(file, m + i * s + s / 2, flipped ? m / 2 : N - m / 2);
+    put(rank, flipped ? N - m / 2 : m / 2, m + (7 - i) * s + s / 2);
+  }
+  boardTex.needsUpdate = true;
+}
+
+/* ============================== Squares ============================== */
+const FILES = 'abcdefgh';
+const sqToLocal = sq => new THREE.Vector3((FILES.indexOf(sq[0]) - 3.5) * SQ, 0, -((+sq[1] - 1) - 3.5) * SQ);
+function localToSq(p) {
+  const f = Math.floor(p.x / SQ + 4), r = Math.floor(-p.z / SQ + 4);
+  return f >= 0 && f < 8 && r >= 0 && r < 8 ? FILES[f] + (r + 1) : null;
+}
+
+// highlight overlays
+const hlGeo = new THREE.PlaneGeometry(SQ, SQ); hlGeo.rotateX(-Math.PI / 2);
+function makeHL(color, opacity) {
+  const m = new THREE.Mesh(hlGeo, new THREE.MeshBasicMaterial({ color, transparent:true, opacity, depthWrite:false }));
+  m.visible = false; m.renderOrder = 1; board.add(m); return m;
+}
+const hlLast = [makeHL(0xcddc39, .38), makeHL(0xcddc39, .38)];
+const hlHover = makeHL(0xffffff, .28);
+const hlBad = makeHL(0xff3b30, .5);
+const hlCheck = makeHL(0xff3b30, .45);
+const hlHint = makeHL(0x4fc3f7, .5);
+const placeHL = (m, sq, y = 0.0006) => { if (!sq) { m.visible = false; return; } m.position.copy(sqToLocal(sq)); m.position.y = y; m.visible = true; };
+
+const dotGeo = new THREE.CircleGeometry(SQ * 0.16, 24); dotGeo.rotateX(-Math.PI / 2);
+const dotMat = new THREE.MeshBasicMaterial({ color:0x1e5e2e, transparent:true, opacity:.55, depthWrite:false });
+const dots = [];
+function showDots(squares) {
+  while (dots.length < squares.length) { const d = new THREE.Mesh(dotGeo, dotMat); d.renderOrder = 2; board.add(d); dots.push(d); }
+  dots.forEach((d, i) => { if (i < squares.length) { d.position.copy(sqToLocal(squares[i])); d.position.y = 0.0012; d.visible = true; } else d.visible = false; });
+}
+
+/* ============================== Piece models ============================== */
+function arc(cx, cy, r, a0, a1, n = 10) {
+  const pts = [];
+  for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); }
+  return pts;
+}
+const BASE = [[0, 0], [1, 0], [1, .1], [.92, .18], [.92, .24], [.8, .3], [.66, .36]];
+const PROFILES = {
+  p: [...BASE, [.5, .55], [.4, .9], [.62, .96], [.62, 1.02], [.34, 1.08], ...arc(0, 1.42, .4, -Math.PI / 2 + .5, Math.PI / 2, 10)],
+  r: [...BASE, [.6, .6], [.58, 1.5], [.78, 1.58], [.8, 2.0], [.56, 2.0], [.56, 1.86], [0, 1.86]],
+  b: [...BASE, [.48, .7], [.36, 1.25], [.62, 1.32], [.62, 1.38], [.34, 1.45], [.48, 1.7], [.44, 1.95], [.28, 2.15], [.08, 2.25], ...arc(0, 2.36, .14, -Math.PI / 2, Math.PI / 2, 6)],
+  q: [...BASE, [.52, .7], [.38, 1.45], [.68, 1.52], [.68, 1.6], [.4, 1.68], [.5, 2.0], [.72, 2.38], [.52, 2.42], [.3, 2.52], ...arc(0, 2.66, .16, -Math.PI / 2, Math.PI / 2, 6)],
+  k: [...BASE, [.54, .7], [.4, 1.55], [.7, 1.62], [.7, 1.7], [.42, 1.78], [.52, 2.1], [.66, 2.4], [.5, 2.48], [.22, 2.56], [0, 2.58]],
+  n: [...BASE, [.6, .55], [.62, .68], [0, .68]],
+};
+const HEIGHTS = { p:1.84, r:2.0, b:2.5, q:2.82, k:3.18, n:2.2 };
+
+const pieceGeo = {};
+for (const [t, prof] of Object.entries(PROFILES)) {
+  const g = new THREE.LatheGeometry(prof.map(([x, y]) => new THREE.Vector2(x, y)), 40);
+  g.scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
+  pieceGeo[t] = g;
+}
+// King cross
+const crossV = new THREE.BoxGeometry(.18, .62, .18).translate(0, 2.86, 0).scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
+const crossH = new THREE.BoxGeometry(.5, .16, .18).translate(0, 2.92, 0).scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
+// Rook merlons
+const merlons = [];
+for (let i = 0; i < 4; i++) {
+  const g = new THREE.BoxGeometry(.3, .22, .22).translate(0, 2.1, .66).rotateY(i * Math.PI / 2 + Math.PI / 4);
+  merlons.push(g.scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE));
+}
+// Knight head: extruded silhouette, faces +Z in its own frame
+const knightHead = (() => {
+  const s = new THREE.Shape();
+  const pts = [[-.58, .6], [.5, .6], [.46, .95], [.82, 1.3], [.98, 1.6], [.9, 1.78], [.6, 1.8], [.36, 1.68], [.22, 1.95],
+    [.1, 2.22], [-.04, 2.05], [-.3, 1.95], [-.55, 1.7], [-.7, 1.3], [-.66, .9]];
+  s.moveTo(...pts[0]); pts.slice(1).forEach(p => s.lineTo(...p)); s.closePath();
+  const g = new THREE.ExtrudeGeometry(s, { depth:.5, bevelEnabled:true, bevelThickness:.08, bevelSize:.06, bevelSegments:3 });
+  g.translate(0, 0, -.25); g.rotateY(-Math.PI / 2);  // shape +x → world +z
+  g.computeVertexNormals();
+  return g.scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
+})();
+const eyeGeo = new THREE.SphereGeometry(.07, 8, 6).scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
+
+const MAT = {
+  w: new THREE.MeshStandardMaterial({ color:0xefe6d2, roughness:.35, metalness:0 }),
+  b: new THREE.MeshStandardMaterial({ color:0x26262b, roughness:.3, metalness:.05 }),
+};
+const GLOW = {
+  w: new THREE.MeshStandardMaterial({ color:0xefe6d2, roughness:.35, emissive:0x3a6b2a, emissiveIntensity:.6 }),
+  b: new THREE.MeshStandardMaterial({ color:0x26262b, roughness:.3, emissive:0x3a6b2a, emissiveIntensity:.6 }),
+};
+
+function makePiece(type, color) {
+  const g = new THREE.Group();
+  const mat = MAT[color];
+  const add = geo => { const m = new THREE.Mesh(geo, mat); m.castShadow = true; m.receiveShadow = true; g.add(m); };
+  add(pieceGeo[type]);
+  if (type === 'k') { add(crossV); add(crossH); }
+  if (type === 'r') merlons.forEach(add);
+  if (type === 'n') {
+    add(knightHead);
+    const eyeMat = new THREE.MeshBasicMaterial({ color: color === 'w' ? 0x222222 : 0xcccccc });
+    for (const sx of [-1, 1]) {
+      const e = new THREE.Mesh(eyeGeo, eyeMat);
+      e.position.set(sx * .3 * PIECE_SCALE, 1.72 * PIECE_SCALE, .45 * PIECE_SCALE); g.add(e);
+    }
+    g.rotation.y = color === 'w' ? Math.PI : 0;   // white knights face rank 8 (-z)
+  }
+  g.userData = { type, color, height: HEIGHTS[type] * PIECE_SCALE };
+  return g;
+}
+
+/* ============================== Board state <-> meshes ============================== */
+const pieces = new Map();     // square -> Group
+const anims = [];             // { obj, from, to, t, dur, onDone, arc }
+const tmpV = new THREE.Vector3();
+
+function clearPieces() { for (const p of pieces.values()) board.remove(p); pieces.clear(); }
+function syncPieces(chess) {
+  clearPieces();
+  for (const row of chess.board()) for (const c of row) if (c) {
+    const p = makePiece(c.type, c.color);
+    p.position.copy(sqToLocal(c.square));
+    board.add(p); pieces.set(c.square, p);
+  }
+}
+function animateTo(obj, target, dur = 0.32, lift = 0.03) {
+  return new Promise(res => anims.push({ obj, from: obj.position.clone(), to: target.clone(), t: 0, dur, lift, onDone: res }));
+}
+function stepAnims(dt) {
+  for (let i = anims.length - 1; i >= 0; i--) {
+    const a = anims[i]; a.t = Math.min(1, a.t + dt / a.dur);
+    const k = a.t < .5 ? 2 * a.t * a.t : 1 - Math.pow(-2 * a.t + 2, 2) / 2;
+    a.obj.position.lerpVectors(a.from, a.to, k);
+    a.obj.position.y += Math.sin(Math.PI * a.t) * a.lift;
+    if (a.t >= 1) { anims.splice(i, 1); a.onDone(); }
+  }
+}
+
+// Apply a chess.js verbose move to the meshes. `held` = piece already placed by hand (skip its animation).
+async function applyMoveMeshes(m, held = false) {
+  const mover = pieces.get(m.from);
+  let capSq = m.captured ? m.to : null;
+  if (m.flags.includes('e')) capSq = m.to[0] + m.from[1];
+  if (capSq && pieces.get(capSq) && pieces.get(capSq) !== mover) { board.remove(pieces.get(capSq)); pieces.delete(capSq); }
+  pieces.delete(m.from);
+  const jobs = [];
+  if (mover) { pieces.set(m.to, mover); jobs.push(held ? animateTo(mover, sqToLocal(m.to), .08, 0) : animateTo(mover, sqToLocal(m.to))); }
+  if (m.flags.includes('k') || m.flags.includes('q')) {
+    const rank = m.from[1];
+    const [rf, rt] = m.flags.includes('k') ? ['h' + rank, 'f' + rank] : ['a' + rank, 'd' + rank];
+    const rook = pieces.get(rf); pieces.delete(rf);
+    if (rook) { pieces.set(rt, rook); jobs.push(animateTo(rook, sqToLocal(rt))); }
+  }
+  await Promise.all(jobs);
+  if (m.promotion && mover) {
+    board.remove(mover);
+    const np = makePiece(m.promotion, m.color); np.position.copy(sqToLocal(m.to));
+    board.add(np); pieces.set(m.to, np);
+  }
+  click();
+}
+
+/* ============================== Sound ============================== */
+let actx = null;
+function click(freq = 520) {
+  try {
+    actx ||= new AudioContext();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'triangle'; o.frequency.value = freq;
+    g.gain.setValueAtTime(.18, actx.currentTime); g.gain.exponentialRampToValueAtTime(.001, actx.currentTime + .09);
+    o.connect(g).connect(actx.destination); o.start(); o.stop(actx.currentTime + .1);
+  } catch {}
+}
+
+/* ============================== Info panel & keys ============================== */
+const infoCanvas = document.createElement('canvas'); infoCanvas.width = 1024; infoCanvas.height = 384;
+const infoTex = new THREE.CanvasTexture(infoCanvas); infoTex.colorSpace = THREE.SRGBColorSpace;
+const infoPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.66, 0.2475), new THREE.MeshBasicMaterial({ map:infoTex, transparent:true }));
+infoPanel.position.set(0, 0.2, -0.36); infoPanel.rotation.x = -0.25;
+table.add(infoPanel);
+
+let flashMsg = null, flashUntil = 0;
+function flash(msg, secs = 2.5) { flashMsg = msg; flashUntil = performance.now() + secs * 1000; drawInfo(); setStatus(msg); }
+
+const P = { data:null, chess:null, color:'w', idx:0, state:'idle', failed:false, submitted:false, ratingDiff:null };
+
+function drawInfo() {
+  const g = infoCanvas.getContext('2d'), W = 1024, H = 384;
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = 'rgba(18,20,24,.86)';
+  g.beginPath(); g.roundRect(4, 4, W - 8, H - 8, 28); g.fill();
+  g.textBaseline = 'top';
+  g.fillStyle = '#e9e6df'; g.font = 'bold 54px system-ui,sans-serif';
+  let title = 'Loading puzzle…', col = '#e9e6df';
+  if (P.state === 'play') title = `${P.color === 'w' ? 'White' : 'Black'} to move`;
+  if (P.state === 'opp' || P.state === 'intro') title = 'Opponent moving…';
+  if (P.state === 'solved') { title = P.failed ? 'Puzzle complete' : 'Solved!'; col = P.failed ? '#d9a441' : '#5fb36b'; }
+  if (P.state === 'shown') { title = 'Solution shown'; col = '#d9a441'; }
+  if (P.state === 'error') { title = 'Error'; col = '#d9574b'; }
+  g.fillStyle = col; g.fillText(title, 40, 34);
+  g.font = '34px system-ui,sans-serif'; g.fillStyle = '#c9c5bb';
+  if (P.data) {
+    const pz = P.data.puzzle;
+    g.fillText(`Puzzle ${pz.id} · rated ${pz.rating}`, 40, 112);
+    g.fillStyle = '#9a978f'; g.font = '28px system-ui,sans-serif';
+    g.fillText(pz.themes.slice(0, 5).join(' · '), 40, 160, W - 80);
+  }
+  g.font = '32px system-ui,sans-serif'; g.fillStyle = '#e9e6df';
+  let line = account ? `${account.username} · ${account.rating ?? '?'}` : 'Not logged in · unrated';
+  if (P.ratingDiff != null) line += `  (${P.ratingDiff >= 0 ? '+' : ''}${P.ratingDiff})`;
+  g.fillText(line, 40, 230);
+  const msg = performance.now() < flashUntil ? flashMsg : null;
+  if (msg) { g.fillStyle = msg.startsWith('Wrong') ? '#ff7a6e' : '#f0c870'; g.font = 'bold 36px system-ui,sans-serif'; g.fillText(msg, 40, 296, W - 80); }
+  infoTex.needsUpdate = true;
+}
+
+// Keys: flat raised buttons on the table to the right of the board, poked from above
+const keys = [];
+function makeKey(label, x, z, action) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#2c2f36'; g.fillRect(0, 0, 256, 128);
+  g.fillStyle = '#e9e6df'; g.font = 'bold 44px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(label, 128, 66);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const side = new THREE.MeshStandardMaterial({ color:0x1f2126 });
+  const top = new THREE.MeshStandardMaterial({ map:tex, roughness:.6, emissive:0xffffff, emissiveMap:tex, emissiveIntensity:.15 });
+  const k = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.018, 0.05), [side, side, top, side, side, side]);
+  k.position.set(x, 0.009, z); k.castShadow = true;
+  k.userData = { action, label, armed:true, baseY:0.009, topMat:top };
+  table.add(k); keys.push(k);
+  return k;
+}
+const KX = HALF + MARGIN + 0.09;
+makeKey('Next', KX, -0.12, () => nextPuzzle());
+makeKey('Solution', KX, -0.05, () => showSolution());
+makeKey('Hint', KX, 0.02, () => showHint());
+makeKey('Higher', KX, 0.1, () => adjustHeight(0.03));
+makeKey('Lower', KX, 0.165, () => adjustHeight(-0.03));
+
+function adjustHeight(d) {
+  table.position.y = THREE.MathUtils.clamp(table.position.y + d, 0.5, 1.4);
+  layoutLegs(); click(700);
+}
+
+/* ============================== Puzzle flow ============================== */
+let loadToken = 0;
+async function nextPuzzle() {
+  if (P.state !== 'solved' && P.state !== 'shown' && P.failed && !P.submitted && P.data) { P.submitted = true; submitResult(P.data.puzzle.id, false); }
+  const my = ++loadToken;
+  Object.assign(P, { state:'loading', failed:false, submitted:false, idx:0, ratingDiff:null });
+  held && dropHeld(true);
+  showDots([]); [hlBad, hlHover, hlHint, hlCheck].forEach(h => h.visible = false);
+  drawInfo(); setStatus('Loading puzzle…');
+  let data;
+  try { data = await nextPuzzleData(); }
+  catch (e) { P.state = 'error'; flash(e.message, 8); return; }
+  if (my !== loadToken) return;
+
+  const chess = new Chess();
+  const sans = data.game.pgn.trim().split(/\s+/);
+  for (const s of sans.slice(0, -1)) chess.move(s);
+  P.data = data; P.chess = chess;
+  P.color = chess.turn() === 'w' ? 'b' : 'w';   // the player moves after the setup move
+  board.rotation.y = P.color === 'w' ? 0 : Math.PI;
+  drawBoard(P.color === 'b');
+  syncPieces(chess);
+  hlLast.forEach(h => h.visible = false);
+  P.state = 'intro'; drawInfo();
+  setStatus(`Puzzle ${data.puzzle.id} (${data.puzzle.rating}). You play ${P.color === 'w' ? 'White' : 'Black'}.`);
+
+  await wait(700);
+  if (my !== loadToken) return;
+  const setup = chess.move(sans[sans.length - 1]);
+  await applyMoveMeshes(setup);
+  markLast(setup); markCheck();
+  P.state = 'play'; drawInfo();
+}
+
+const wait = ms => new Promise(r => setTimeout(r, ms));
+function markLast(m) { placeHL(hlLast[0], m.from); placeHL(hlLast[1], m.to); }
+function markCheck() {
+  const c = P.chess;
+  if (!c.inCheck()) { hlCheck.visible = false; return; }
+  for (const row of c.board()) for (const s of row) if (s && s.type === 'k' && s.color === c.turn()) placeHL(hlCheck, s.square, .0009);
+}
+const uci = m => m.from + m.to + (m.promotion || '');
+
+async function playerMove(from, to, viaHand) {
+  const c = P.chess, sol = P.data.puzzle.solution;
+  const expected = sol[P.idx];
+  const legal = c.moves({ square:from, verbose:true }).filter(m => m.to === to);
+  if (!legal.length) return false;
+  // promotion: use the solution's piece if it matches this from/to, else queen
+  const promo = legal[0].promotion ? (expected?.slice(0, 4) === from + to && expected[4] ? expected[4] : 'q') : undefined;
+  const m = c.move({ from, to, promotion:promo });
+  hlHint.visible = false;
+  P.state = 'opp';
+  await applyMoveMeshes(m, viaHand);
+  markLast(m); markCheck();
+
+  const correct = uci(m) === expected || c.isCheckmate();
+  if (!correct) {
+    hlBad.visible = true; placeHL(hlBad, m.to, .001);
+    click(180);
+    flash('Wrong move. Try again.');
+    if (!P.failed) { P.failed = true; P.submitted = true; submitResult(P.data.puzzle.id, false).then(d => { P.ratingDiff = d; drawInfo(); }); }
+    await wait(650);
+    c.undo();
+    syncPieces(c);
+    hlBad.visible = false;
+    const prev = c.history({ verbose:true }).at(-1); prev ? markLast(prev) : hlLast.forEach(h => h.visible = false);
+    markCheck();
+    P.state = 'play'; drawInfo();
+    return true;
+  }
+
+  P.idx++;
+  if (P.idx >= sol.length) return finish();
+  flash(P.failed ? 'Correct.' : 'Best move!', 1.2);
+  await wait(450);
+  const reply = sol[P.idx];
+  const rm = c.move({ from:reply.slice(0, 2), to:reply.slice(2, 4), promotion:reply[4] });
+  await applyMoveMeshes(rm);
+  markLast(rm); markCheck();
+  P.idx++;
+  if (P.idx >= sol.length) return finish();
+  P.state = 'play'; drawInfo();
+  return true;
+}
+
+async function finish() {
+  P.state = 'solved'; click(880); drawInfo();
+  if (!P.submitted) {
+    P.submitted = true;
+    P.ratingDiff = await submitResult(P.data.puzzle.id, !P.failed);
+    drawInfo();
+  }
+  flash(P.failed ? 'Done. Poke Next for another.' : 'Solved! Poke Next for another.', 30);
+  return true;
+}
+
+async function showSolution() {
+  if (P.state !== 'play') return;
+  held && dropHeld(true);
+  P.state = 'shown'; drawInfo();
+  if (!P.submitted) { P.submitted = true; P.failed = true; submitResult(P.data.puzzle.id, false).then(d => { P.ratingDiff = d; drawInfo(); }); }
+  const c = P.chess, sol = P.data.puzzle.solution;
+  while (P.idx < sol.length) {
+    const u = sol[P.idx++];
+    const m = c.move({ from:u.slice(0, 2), to:u.slice(2, 4), promotion:u[4] });
+    await applyMoveMeshes(m); markLast(m); markCheck();
+    await wait(600);
+  }
+  flash('Poke Next for another puzzle.', 30);
+}
+
+function showHint() {
+  if (P.state !== 'play') return;
+  placeHL(hlHint, P.data.puzzle.solution[P.idx].slice(0, 2), .0011);
+  click(620);
+}
+
+/* ============================== Grabbing (hands + mouse) ============================== */
+let held = null;   // { piece, from, offset: Vector3 (board-local), source }
+
+function pieceAt(local, radius) {
+  let best = null, bestD = radius;
+  for (const [sq, p] of pieces) {
+    if (p.userData.color !== P.color) continue;
+    const top = p.userData.height + 0.02;
+    tmpV.set(p.position.x, THREE.MathUtils.clamp(local.y, 0, top), p.position.z);
+    const d = tmpV.distanceTo(local);
+    if (d < bestD) { bestD = d; best = sq; }
+  }
+  return best;
+}
+
+function startHold(sq, local, source) {
+  if (P.state !== 'play' || held) return false;
+  const piece = pieces.get(sq);
+  held = { piece, from:sq, offset: local.clone().sub(piece.position), source };
+  const c = piece.userData.color;
+  piece.traverse(o => { if (o.isMesh && o.material === MAT[c]) o.material = GLOW[c]; });
+  showDots(P.chess.moves({ square:sq, verbose:true }).map(m => m.to));
+  hlHint.visible = false;
+  click(440);
+  return true;
+}
+
+function moveHold(local) {
+  const p = held.piece;
+  p.position.copy(local).sub(held.offset);
+  p.position.y = Math.max(p.position.y, 0);
+  placeHL(hlHover, localToSq(p.position), .0008);
+}
+
+function restoreMat(piece) {
+  const c = piece.userData.color;
+  piece.traverse(o => { if (o.isMesh && o.material === GLOW[c]) o.material = MAT[c]; });
+}
+
+async function dropHeld(cancel = false) {
+  const h = held; held = null;
+  if (!h) return;
+  restoreMat(h.piece); showDots([]); hlHover.visible = false;
+  const to = cancel ? null : localToSq(h.piece.position);
+  const ok = to && to !== h.from && P.chess.moves({ square:h.from, verbose:true }).some(m => m.to === to);
+  if (!ok) { await animateTo(h.piece, sqToLocal(h.from), .18, 0); return; }
+  await playerMove(h.from, to, true);
+}
+
+// --- Hands
+const handFactory = new XRHandModelFactory();
+const hands = [0, 1].map(i => {
+  const hand = renderer.xr.getHand(i);
+  hand.add(handFactory.createHandModel(hand, 'mesh'));
+  scene.add(hand);
+  const st = { hand, pinching:false, tracked:false, pokeKey:null };
+  hand.addEventListener('connected', e => { st.tracked = !!e.data.hand; });
+  hand.addEventListener('disconnected', () => { st.tracked = false; if (held?.source === st) dropHeld(true); });
+  return st;
+});
+
+const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vMid = new THREE.Vector3(), vLocal = new THREE.Vector3();
+function updateHands() {
+  for (const st of hands) {
+    const j = st.hand.joints;
+    const thumb = j?.['thumb-tip'], index = j?.['index-finger-tip'];
+    if (!st.tracked || !thumb || !index || !index.visible) continue;
+    thumb.getWorldPosition(vA); index.getWorldPosition(vB);
+    const d = vA.distanceTo(vB);
+    vMid.addVectors(vA, vB).multiplyScalar(.5);
+    board.worldToLocal(vLocal.copy(vMid));
+
+    if (!st.pinching && d < PINCH_ON) {
+      st.pinching = true;
+      const sq = pieceAt(vLocal, GRAB_RADIUS);
+      if (sq) startHold(sq, vLocal, st);
+    } else if (st.pinching && d > PINCH_OFF) {
+      st.pinching = false;
+      if (held?.source === st) dropHeld();
+    }
+    if (held?.source === st) moveHold(vLocal);
+
+    // poke keys with index tip (only when not pinching)
+    if (!st.pinching) pokeKeys(vB, st);
+  }
+}
+
+const vKey = new THREE.Vector3();
+function pokeKeys(tipWorld, st) {
+  table.worldToLocal(vKey.copy(tipWorld));
+  for (const k of keys) {
+    const dx = vKey.x - k.position.x, dz = vKey.z - k.position.z;
+    const dy = vKey.y - (k.userData.baseY + 0.009);           // height of fingertip joint above key top
+    const inside = Math.abs(dx) < 0.055 && Math.abs(dz) < 0.03;
+    const pressed = inside && dy < 0.012 && dy > -0.04;
+    const near = inside && dy < 0.05 && dy > -0.04;
+    k.position.y = k.userData.baseY - (inside && dy < 0.012 ? 0.006 : 0);
+    if (pressed && k.userData.armed) { k.userData.armed = false; st.pokeKey = k; k.userData.action(); }
+    if (!near && st.pokeKey === k) { k.userData.armed = true; st.pokeKey = null; }
+  }
+}
+
+// --- Mouse / touch fallback (desktop testing)
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+const boardPlane = new THREE.Plane();
+const mouseSrc = {};
+function rayFromEvent(e) {
+  ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+}
+function boardHit(height = 0) {
+  board.updateMatrixWorld();
+  const n = new THREE.Vector3(0, 1, 0), p = board.localToWorld(new THREE.Vector3(0, height, 0));
+  boardPlane.setFromNormalAndCoplanarPoint(n, p);
+  const hit = new THREE.Vector3();
+  return ray.ray.intersectPlane(boardPlane, hit) ? board.worldToLocal(hit) : null;
+}
+canvas.addEventListener('pointerdown', e => {
+  if (renderer.xr.isPresenting) return;
+  rayFromEvent(e);
+  const kh = ray.intersectObjects(keys, false)[0];
+  if (kh) { kh.object.userData.action(); return; }
+  const hits = ray.intersectObjects([...pieces.values()], true);
+  let sq = null;
+  for (const h of hits) { for (const [s, p] of pieces) { let o = h.object; while (o && o !== p) o = o.parent; if (o === p && p.userData.color === P.color) { sq = s; break; } } if (sq) break; }
+  if (sq && startHold(sq, pieces.get(sq).position.clone(), mouseSrc)) { orbit.enabled = false; canvas.setPointerCapture(e.pointerId); }
+});
+canvas.addEventListener('pointermove', e => {
+  if (held?.source !== mouseSrc) return;
+  rayFromEvent(e);
+  const p = boardHit(0.02);
+  if (p) { p.y = 0.02; moveHold(p); }
+});
+canvas.addEventListener('pointerup', () => {
+  if (held?.source === mouseSrc) { held.piece.position.y = 0; dropHeld(); }
+  orbit.enabled = true;
+});
+
+/* ============================== XR session ============================== */
+let placeOnStart = false;
+$('vr').addEventListener('click', async () => {
+  if (renderer.xr.isPresenting) { renderer.xr.getSession().end(); return; }
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', { requiredFeatures:['local-floor'], optionalFeatures:['hand-tracking'] });
+    await renderer.xr.setSession(session);
+    placeOnStart = true;
+    $('vr').textContent = 'Exit VR';
+    session.addEventListener('end', () => { $('vr').textContent = 'Enter VR'; });
+  } catch (e) { setStatus('Could not start VR: ' + e.message); }
+});
+
+// Put the table in front of the user's head on session start
+const headPos = new THREE.Vector3(), headDir = new THREE.Vector3();
+function placeTableFromHead() {
+  const cam = renderer.xr.getCamera();
+  cam.getWorldPosition(headPos);
+  if (headPos.lengthSq() === 0) return false;
+  cam.getWorldDirection(headDir); headDir.y = 0;
+  if (headDir.lengthSq() < 1e-4) headDir.set(0, 0, -1);
+  headDir.normalize();
+  const y = THREE.MathUtils.clamp(headPos.y - 0.55, 0.55, 1.3);
+  table.position.set(headPos.x + headDir.x * 0.42, y, headPos.z + headDir.z * 0.42);
+  table.rotation.y = Math.atan2(-headDir.x, -headDir.z);
+  layoutLegs();
+  return true;
+}
+
+/* ============================== Loop ============================== */
+const clock = new THREE.Clock();
+let lastInfo = 0;
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (placeOnStart && renderer.xr.isPresenting && placeTableFromHead()) placeOnStart = false;
+  if (renderer.xr.isPresenting) updateHands(); else orbit.update();
+  stepAnims(dt);
+  const now = performance.now();
+  if (flashMsg && now > flashUntil && now - lastInfo > 200) { lastInfo = now; flashMsg = null; drawInfo(); }
+  renderer.render(scene, camera);
+});
+
+/* ============================== Boot ============================== */
+$('login').onclick = () => login().catch(e => setStatus(e.message));
+$('logout').onclick = async () => {
+  const t = store.token; store.token = null; account = null; queue = []; refreshUserUI();
+  try { await fetch(`${LICHESS}/api/token`, { method:'DELETE', headers:{ Authorization:`Bearer ${t}` } }); } catch {}
+  nextPuzzle();
+};
+
+(async () => {
+  drawBoard(false);
+  try { await finishLogin(); } catch (e) { setStatus(e.message); }
+  try { await loadAccount(); } catch (e) { setStatus(e.message); }
+  refreshUserUI();
+  if (navigator.xr && await navigator.xr.isSessionSupported('immersive-vr').catch(() => false)) $('vr').disabled = false;
+  else $('vr').title = 'WebXR VR not available in this browser';
+  nextPuzzle();
+})();
+</script>
+</body>
+</html>
