@@ -14,14 +14,28 @@ Live at: https://peery-a.github.io/vr-puzzles/
 
 ## Controls
 
+Right of the board:
+
 | Action | How |
 |---|---|
 | Move a piece | Pinch it (thumb + index), carry it, release over the target square. Legal squares show green dots. |
-| Next puzzle | Poke the **Next** key on the table |
+| Next puzzle | Poke **Next** |
 | Hint | **Hint** highlights the piece to move (does not count as a fail) |
 | Show solution | **Solution** plays the answer and records a loss |
-| Table height | **Higher** / **Lower** keys, 3 cm per poke |
-| Re-center | Hold the Meta button to recenter; exit and re-enter VR to re-place the table |
+| Table height | **Higher** / **Lower**, 3 cm per poke |
+
+Left of the board:
+
+| Action | How |
+|---|---|
+| Step through moves | **◀** / **▶**. Works during and after the puzzle. While reviewing, pieces are locked; poke ▶ back to the current position to keep playing. |
+| Board size | **Board +** / **Board −**, 10% per poke, 70%–160%. The setting is saved. |
+
+Re-center: hold the Meta button, or exit and re-enter VR to re-place the table.
+
+## Pieces
+
+Tournament Staunton proportions: king 1.7× the square height, base about 70% of the square. Rook has crenellations, bishop a mitre slit, queen a beaded coronet, knight a carved head.
 
 ## Rating rules
 
@@ -33,4 +47,4 @@ Live at: https://peery-a.github.io/vr-puzzles/
 
 ## Desktop testing
 
-The same page works on a PC: drag pieces with the mouse, orbit with right-drag or left-drag on empty space, click the keys.
+The same page works on a PC: drag pieces with the mouse, orbit with right-drag or left-drag on empty space, click the keys. Arrow keys step through moves. The **Board size** slider sits in the top-left panel.

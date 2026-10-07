@@ -13,7 +13,9 @@
   #ui h1 { font-size:17px; margin:0 0 6px; }
   #ui p { margin:6px 0; color:var(--mute); }
   #user { color:var(--fg); }
-  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+  .row label { color:var(--mute); }
+  input[type=range] { flex:1; min-width:120px; accent-color:var(--accent); }
   button { font:inherit; border:0; border-radius:7px; padding:9px 14px; cursor:pointer; background:#2c2f36; color:var(--fg); }
   button.primary { background:var(--accent); color:#1b1408; font-weight:600; }
   button:disabled { opacity:.45; cursor:default; }
@@ -37,7 +39,12 @@
     <button id="logout" hidden>Log out</button>
     <button id="vr" class="primary" disabled>Enter VR</button>
   </div>
-  <p>In VR: pinch a piece to pick it up, release over a square to move. Poke the keys on the table with your index finger.</p>
+  <div class="row">
+    <label for="scale">Board size</label>
+    <input id="scale" type="range" min="0.7" max="1.6" step="0.05">
+    <span id="scaleVal"></span>
+  </div>
+  <p>In VR: pinch a piece to pick it up, release over a square to move. Poke the keys on the table with your index finger. ◀ ▶ step through the moves. On desktop, use the arrow keys.</p>
 </div>
 
 <script type="module">
@@ -50,11 +57,12 @@ import { Chess } from 'https://cdn.jsdelivr.net/npm/chess.js@1.4.0/+esm';
 const LICHESS = 'https://lichess.org';
 const CLIENT_ID = 'vr-lichess-puzzles';
 const REDIRECT = location.origin + location.pathname;
-const SQ = 0.065;                 // square size, metres
+const SQ = 0.065;                 // square size at 100% board scale, metres
 const HALF = SQ * 4;
-const PIECE_SCALE = 0.024;        // base radius of pieces, metres
+const MM = SQ / 57;               // piece profiles are drawn in mm for a 57 mm tournament square
 const PINCH_ON = 0.022, PINCH_OFF = 0.04;
 const GRAB_RADIUS = 0.05;
+const SCALE_MIN = 0.7, SCALE_MAX = 1.6, SCALE_STEP = 0.1;
 
 /* ============================== 2D UI ============================== */
 const $ = id => document.getElementById(id);
@@ -64,6 +72,8 @@ const setStatus = t => { $('status').textContent = t; };
 const store = {
   get token() { try { return localStorage.getItem('lp_token'); } catch { return null; } },
   set token(v) { try { v ? localStorage.setItem('lp_token', v) : localStorage.removeItem('lp_token'); } catch {} },
+  get scale() { try { return parseFloat(localStorage.getItem('lp_scale')); } catch { return NaN; } },
+  set scale(v) { try { localStorage.setItem('lp_scale', String(v)); } catch {} },
 };
 const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const randStr = n => b64url(crypto.getRandomValues(new Uint8Array(n)));
@@ -203,13 +213,13 @@ addEventListener('resize', () => {
   lamp.position.set(0.6, 1.8, 0.8);
   lamp.target.position.set(0, 0, 0);
   lamp.castShadow = true;
-  lamp.shadow.mapSize.set(1024, 1024);
-  Object.assign(lamp.shadow.camera, { left:-0.6, right:0.6, top:0.6, bottom:-0.6, near:0.5, far:4 });
+  lamp.shadow.mapSize.set(2048, 2048);
+  Object.assign(lamp.shadow.camera, { left:-0.8, right:0.8, top:0.8, bottom:-0.8, near:0.5, far:4 });
   lamp.shadow.bias = -0.0005;
   window.__lamp = lamp;
 }
 
-// --- Table group: origin at centre of board surface. Board group rotates for black.
+// --- Table group: origin at centre of board surface. Board group rotates for black and scales with board size.
 const table = new THREE.Group();
 table.position.set(0, 0.85, -0.5);
 scene.add(table);
@@ -218,18 +228,21 @@ const board = new THREE.Group();
 table.add(board);
 
 const wood = new THREE.MeshStandardMaterial({ color:0x5a3a22, roughness:.6 });
-const tableTop = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.04, 0.72), wood);
+const tableTop = new THREE.Mesh(new THREE.BoxGeometry(1, 0.04, 1), wood);
 tableTop.position.y = -0.03; tableTop.receiveShadow = true; table.add(tableTop);
+let tableW = 1.0, tableD = 0.72;
 const legs = [];
-for (const [x, z] of [[-.45, -.31], [.45, -.31], [-.45, .31], [.45, .31]]) {
+for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
   const leg = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1, 0.05), wood);
-  leg.userData.xz = [x, z]; legs.push(leg); table.add(leg);
+  leg.userData.s = [sx, sz]; legs.push(leg); table.add(leg);
 }
 function layoutLegs() {
   const h = table.position.y - 0.05;
-  for (const leg of legs) { leg.scale.y = h; leg.position.set(leg.userData.xz[0], -0.05 - h / 2, leg.userData.xz[1]); }
+  for (const leg of legs) {
+    leg.scale.y = h;
+    leg.position.set(leg.userData.s[0] * (tableW / 2 - 0.05), -0.05 - h / 2, leg.userData.s[1] * (tableD / 2 - 0.05));
+  }
 }
-layoutLegs();
 
 // Board surface with coordinates (redrawn on flip so labels read correctly)
 const boardCanvas = document.createElement('canvas');
@@ -250,14 +263,12 @@ function drawBoard(flipped) {
   g.fillStyle = '#3b2616'; g.fillRect(0, 0, N, N);
   for (let r = 0; r < 8; r++) for (let f = 0; f < 8; f++) {
     g.fillStyle = (r + f) % 2 ? '#b58863' : '#f0d9b5';
-    // canvas row 0 is far edge (rank 8 for white). Board group rotation handles black.
     g.fillRect(m + f * s, m + (7 - r) * s, s, s);
   }
   g.fillStyle = '#e8d6b8'; g.font = `bold ${Math.round(m * 0.62)}px system-ui,sans-serif`;
   g.textAlign = 'center'; g.textBaseline = 'middle';
   for (let i = 0; i < 8; i++) {
     const file = 'abcdefgh'[i], rank = String(i + 1);
-    // labels are drawn rotated 180° when the board group is rotated, so they face the player
     const put = (txt, x, y) => { g.save(); g.translate(x, y); if (flipped) g.rotate(Math.PI); g.fillText(txt, 0, 0); g.restore(); };
     put(file, m + i * s + s / 2, flipped ? m / 2 : N - m / 2);
     put(rank, flipped ? N - m / 2 : m / 2, m + (7 - i) * s + s / 2);
@@ -294,50 +305,85 @@ function showDots(squares) {
   dots.forEach((d, i) => { if (i < squares.length) { d.position.copy(sqToLocal(squares[i])); d.position.y = 0.0012; d.visible = true; } else d.visible = false; });
 }
 
-/* ============================== Piece models ============================== */
-function arc(cx, cy, r, a0, a1, n = 10) {
+/* ============================== Staunton piece models ============================== */
+// Profiles are [radius, height] in mm, sized to tournament proportions for a 57 mm square:
+// king ~97 mm tall on a 39 mm base, pawn ~46 mm on a 30 mm base.
+const TAU = Math.PI * 2;
+function arc(cx, cy, r, a0, a1, n = 8) {
   const pts = [];
   for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); }
   return pts;
 }
-const BASE = [[0, 0], [1, 0], [1, .1], [.92, .18], [.92, .24], [.8, .3], [.66, .36]];
-const PROFILES = {
-  p: [...BASE, [.5, .55], [.4, .9], [.62, .96], [.62, 1.02], [.34, 1.08], ...arc(0, 1.42, .4, -Math.PI / 2 + .5, Math.PI / 2, 10)],
-  r: [...BASE, [.6, .6], [.58, 1.5], [.78, 1.58], [.8, 2.0], [.56, 2.0], [.56, 1.86], [0, 1.86]],
-  b: [...BASE, [.48, .7], [.36, 1.25], [.62, 1.32], [.62, 1.38], [.34, 1.45], [.48, 1.7], [.44, 1.95], [.28, 2.15], [.08, 2.25], ...arc(0, 2.36, .14, -Math.PI / 2, Math.PI / 2, 6)],
-  q: [...BASE, [.52, .7], [.38, 1.45], [.68, 1.52], [.68, 1.6], [.4, 1.68], [.5, 2.0], [.72, 2.38], [.52, 2.42], [.3, 2.52], ...arc(0, 2.66, .16, -Math.PI / 2, Math.PI / 2, 6)],
-  k: [...BASE, [.54, .7], [.4, 1.55], [.7, 1.62], [.7, 1.7], [.42, 1.78], [.52, 2.1], [.66, 2.4], [.5, 2.48], [.22, 2.56], [0, 2.58]],
-  n: [...BASE, [.6, .55], [.62, .68], [0, .68]],
-};
-const HEIGHTS = { p:1.84, r:2.0, b:2.5, q:2.82, k:3.18, n:2.2 };
+// Stepped base with a large torus bead and a smaller upper bead, scaled to base radius R
+function base(R) {
+  const f = R / 19.5;
+  return [[0, 0], [R, 0], [R, 1.5 * f], ...arc(R - 2.2 * f, 4 * f, 2.5 * f, -1.0, Math.PI / 2, 6),
+    [R - 4.5 * f, 7.5 * f], ...arc(R - 5 * f, 10.5 * f, 1.5 * f, -Math.PI / 2, Math.PI / 2, 5), [R - 6.5 * f, 13 * f]];
+}
+function lathe(prof) {
+  const pts = [];
+  for (const [x, y] of prof) {
+    const l = pts.at(-1);
+    if (!l || Math.hypot(l.x - x, l.y - y) > 1e-4) pts.push(new THREE.Vector2(Math.max(0, x), y));
+  }
+  return new THREE.LatheGeometry(pts, 48).scale(MM, MM, MM);
+}
+const mm = g => g.scale(MM, MM, MM);
 
-const pieceGeo = {};
-for (const [t, prof] of Object.entries(PROFILES)) {
-  const g = new THREE.LatheGeometry(prof.map(([x, y]) => new THREE.Vector2(x, y)), 40);
-  g.scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
-  pieceGeo[t] = g;
+const PROFILES = {
+  p: [...base(15), [7.5, 12], [5.5, 25], [9, 27], [9.5, 28.5], [9, 29.5], [5, 30.5],
+      ...arc(0, 38, 8, -Math.PI / 2 + 0.62, Math.PI / 2, 14)],
+  r: [...base(18), [11.8, 14.5], [10.8, 40], [12.5, 41.5], [12.5, 43.5], [11, 44.5], [11.5, 46], [12.5, 54],
+      [14, 55.5], [14, 58], [11, 58], [11, 56.5], [0, 56.5]],
+  n: [...base(17.5), [12, 13.5], [12, 15.5], [10.5, 16.5], [0, 16.5]],
+  b: [...base(17), [10, 14], [7.5, 26], [6, 37], [7.5, 39], [11, 40.5], [11, 42.5], [6.5, 44], [8.5, 45], [8.5, 46.5],
+      [6.5, 47.5], [7.5, 50], [9.5, 55], [10, 59], [9.3, 63], [7.5, 67], [5, 70], [2.5, 72],
+      ...arc(0, 74.5, 2.6, -Math.PI / 2 + 0.9, Math.PI / 2, 6)],
+  q: [...base(18.5), [11, 15], [8.5, 28], [6.5, 43], [8.5, 45], ...arc(10, 47, 1.9, -Math.PI / 2, Math.PI / 2, 5),
+      [12.3, 50], [12.3, 52], [7.5, 53.5], [6.5, 55.5], [8, 61], [11, 68], [13, 72.5], [13, 74.5], [11.5, 75.2],
+      [9.5, 76], [7.5, 77.5], [4.5, 78.8], [2.8, 79.6], ...arc(0, 82.5, 3.2, -Math.PI / 2 + 1.05, Math.PI / 2, 8)],
+  k: [...base(19.5), [11.5, 16], [9, 30], [7, 46], [9, 48], ...arc(10.5, 50, 2, -Math.PI / 2, Math.PI / 2, 5),
+      [13, 53.5], [13, 55.5], [8, 57], [7, 59], [8.5, 64], [11.5, 72], [13.5, 76], [13.5, 78], [11.5, 79],
+      [9.5, 80.5], [6, 82.5], [3, 83.2], [3, 85], [0, 85]],
+};
+const BODY = {};
+for (const [t, prof] of Object.entries(PROFILES)) BODY[t] = lathe(prof);
+
+const EXTRA = { p:[], b:[], r:[], n:[], q:[], k:[] };
+// King: cross
+EXTRA.k.push(mm(new THREE.BoxGeometry(3.6, 12, 3.6).translate(0, 91, 0)));
+EXTRA.k.push(mm(new THREE.BoxGeometry(10, 3.4, 3.6).translate(0, 92.5, 0)));
+// Queen: coronet of 8 beads
+for (let i = 0; i < 8; i++) {
+  const a = i * TAU / 8;
+  EXTRA.q.push(mm(new THREE.SphereGeometry(1.7, 10, 8).translate(Math.cos(a) * 12.4, 75.4, Math.sin(a) * 12.4)));
 }
-// King cross
-const crossV = new THREE.BoxGeometry(.18, .62, .18).translate(0, 2.86, 0).scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
-const crossH = new THREE.BoxGeometry(.5, .16, .18).translate(0, 2.92, 0).scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
-// Rook merlons
-const merlons = [];
-for (let i = 0; i < 4; i++) {
-  const g = new THREE.BoxGeometry(.3, .22, .22).translate(0, 2.1, .66).rotateY(i * Math.PI / 2 + Math.PI / 4);
-  merlons.push(g.scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE));
-}
-// Knight head: extruded silhouette, faces +Z in its own frame
-const knightHead = (() => {
+// Rook: six crenellated merlons
+for (let i = 0; i < 6; i++) {
+  const seg = TAU / 6, a0 = i * seg + 0.17, a1 = (i + 1) * seg - 0.17;
   const s = new THREE.Shape();
-  const pts = [[-.58, .6], [.5, .6], [.46, .95], [.82, 1.3], [.98, 1.6], [.9, 1.78], [.6, 1.8], [.36, 1.68], [.22, 1.95],
-    [.1, 2.22], [-.04, 2.05], [-.3, 1.95], [-.55, 1.7], [-.7, 1.3], [-.66, .9]];
+  s.absarc(0, 0, 14, a0, a1, false);
+  s.absarc(0, 0, 11, a1, a0, true);
+  EXTRA.r.push(mm(new THREE.ExtrudeGeometry(s, { depth:4.5, bevelEnabled:false, curveSegments:8 }).rotateX(-Math.PI / 2).translate(0, 58, 0)));
+}
+// Knight: carved head silhouette, extruded; faces +Z in its own frame
+EXTRA.n.push((() => {
+  const pts = [[-12, 16], [11, 16], [12, 22], [10, 30], [6, 36], [8, 40], [13, 43], [17, 46], [18.5, 50], [17, 53.5],
+    [12, 56], [7, 60], [5, 64], [6, 67.5], [4, 68], [1, 63], [-3, 62], [-8, 58], [-11, 50], [-13, 40], [-14, 30], [-13, 22]];
+  const s = new THREE.Shape();
   s.moveTo(...pts[0]); pts.slice(1).forEach(p => s.lineTo(...p)); s.closePath();
-  const g = new THREE.ExtrudeGeometry(s, { depth:.5, bevelEnabled:true, bevelThickness:.08, bevelSize:.06, bevelSegments:3 });
-  g.translate(0, 0, -.25); g.rotateY(-Math.PI / 2);  // shape +x → world +z
-  g.computeVertexNormals();
-  return g.scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
-})();
-const eyeGeo = new THREE.SphereGeometry(.07, 8, 6).scale(PIECE_SCALE, PIECE_SCALE, PIECE_SCALE);
+  const g = new THREE.ExtrudeGeometry(s, { depth:10, bevelEnabled:true, bevelThickness:1.5, bevelSize:1.2, bevelSegments:3 });
+  g.translate(0, 0, -5); g.rotateY(-Math.PI / 2);   // shape +x → +z
+  return mm(g);
+})());
+const eyeGeo = mm(new THREE.SphereGeometry(1.4, 10, 8));
+// Bishop: mitre slit
+const slitGeo = mm(new THREE.BoxGeometry(2.6, 9, 1.4).rotateX(0.6).translate(8.4, 60.5, 0));
+
+const HEIGHT = {};
+for (const t of Object.keys(BODY)) {
+  HEIGHT[t] = Math.max(...[BODY[t], ...EXTRA[t]].map(g => { g.computeBoundingBox(); return g.boundingBox.max.y; }));
+}
 
 const MAT = {
   w: new THREE.MeshStandardMaterial({ color:0xefe6d2, roughness:.35, metalness:0 }),
@@ -347,30 +393,32 @@ const GLOW = {
   w: new THREE.MeshStandardMaterial({ color:0xefe6d2, roughness:.35, emissive:0x3a6b2a, emissiveIntensity:.6 }),
   b: new THREE.MeshStandardMaterial({ color:0x26262b, roughness:.3, emissive:0x3a6b2a, emissiveIntensity:.6 }),
 };
+const DETAIL = {
+  w: new THREE.MeshStandardMaterial({ color:0x3a3632, roughness:.6 }),
+  b: new THREE.MeshStandardMaterial({ color:0x0b0b0d, roughness:.6 }),
+};
 
 function makePiece(type, color) {
   const g = new THREE.Group();
-  const mat = MAT[color];
-  const add = geo => { const m = new THREE.Mesh(geo, mat); m.castShadow = true; m.receiveShadow = true; g.add(m); };
-  add(pieceGeo[type]);
-  if (type === 'k') { add(crossV); add(crossH); }
-  if (type === 'r') merlons.forEach(add);
+  const add = (geo, mat = MAT[color]) => { const m = new THREE.Mesh(geo, mat); m.castShadow = true; m.receiveShadow = true; g.add(m); return m; };
+  add(BODY[type]);
+  for (const geo of EXTRA[type]) add(geo);
+  if (type === 'b') add(slitGeo, DETAIL[color]);
   if (type === 'n') {
-    add(knightHead);
     const eyeMat = new THREE.MeshBasicMaterial({ color: color === 'w' ? 0x222222 : 0xcccccc });
     for (const sx of [-1, 1]) {
       const e = new THREE.Mesh(eyeGeo, eyeMat);
-      e.position.set(sx * .3 * PIECE_SCALE, 1.72 * PIECE_SCALE, .45 * PIECE_SCALE); g.add(e);
+      e.position.set(sx * 6.3 * MM, 57.5 * MM, 6 * MM); g.add(e);
     }
     g.rotation.y = color === 'w' ? Math.PI : 0;   // white knights face rank 8 (-z)
   }
-  g.userData = { type, color, height: HEIGHTS[type] * PIECE_SCALE };
+  g.userData = { type, color, height: HEIGHT[type] };
   return g;
 }
 
 /* ============================== Board state <-> meshes ============================== */
 const pieces = new Map();     // square -> Group
-const anims = [];             // { obj, from, to, t, dur, onDone, arc }
+const anims = [];
 const tmpV = new THREE.Vector3();
 
 function clearPieces() { for (const p of pieces.values()) board.remove(p); pieces.clear(); }
@@ -435,13 +483,16 @@ function click(freq = 520) {
 const infoCanvas = document.createElement('canvas'); infoCanvas.width = 1024; infoCanvas.height = 384;
 const infoTex = new THREE.CanvasTexture(infoCanvas); infoTex.colorSpace = THREE.SRGBColorSpace;
 const infoPanel = new THREE.Mesh(new THREE.PlaneGeometry(0.66, 0.2475), new THREE.MeshBasicMaterial({ map:infoTex, transparent:true }));
-infoPanel.position.set(0, 0.2, -0.36); infoPanel.rotation.x = -0.25;
+infoPanel.rotation.x = -0.25;
 table.add(infoPanel);
 
 let flashMsg = null, flashUntil = 0;
 function flash(msg, secs = 2.5) { flashMsg = msg; flashUntil = performance.now() + secs * 1000; drawInfo(); setStatus(msg); }
 
-const P = { data:null, chess:null, color:'w', idx:0, state:'idle', failed:false, submitted:false, ratingDiff:null };
+// line: positions from puzzle start. line[i] = { fen, move } where move led to fen. view = index shown on the board.
+const P = { data:null, chess:null, color:'w', idx:0, state:'idle', failed:false, submitted:false, ratingDiff:null, line:[], view:0 };
+const atLive = () => !P.line.length || P.view === P.line.length - 1;
+function pushLine(m) { P.line.push({ fen:P.chess.fen(), move:m }); P.view = P.line.length - 1; }
 
 function drawInfo() {
   const g = infoCanvas.getContext('2d'), W = 1024, H = 384;
@@ -456,6 +507,10 @@ function drawInfo() {
   if (P.state === 'solved') { title = P.failed ? 'Puzzle complete' : 'Solved!'; col = P.failed ? '#d9a441' : '#5fb36b'; }
   if (P.state === 'shown') { title = 'Solution shown'; col = '#d9a441'; }
   if (P.state === 'error') { title = 'Error'; col = '#d9574b'; }
+  if (!atLive() && ['play', 'solved', 'shown'].includes(P.state)) {
+    const mv = P.line[P.view].move;
+    title = `Reviewing ${P.view}/${P.line.length - 1}${mv ? ' · ' + mv.san : ''}`; col = '#4fc3f7';
+  }
   g.fillStyle = col; g.fillText(title, 40, 34);
   g.font = '34px system-ui,sans-serif'; g.fillStyle = '#c9c5bb';
   if (P.data) {
@@ -473,41 +528,108 @@ function drawInfo() {
   infoTex.needsUpdate = true;
 }
 
-// Keys: flat raised buttons on the table to the right of the board, poked from above
+// Keys: flat raised buttons on the table either side of the board, poked from above.
+// side: -1 left of board, +1 right. dx: offset within the column.
 const keys = [];
-function makeKey(label, x, z, action) {
-  const c = document.createElement('canvas'); c.width = 256; c.height = 128;
-  const g = c.getContext('2d');
-  g.fillStyle = '#2c2f36'; g.fillRect(0, 0, 256, 128);
-  g.fillStyle = '#e9e6df'; g.font = 'bold 44px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.fillText(label, 128, 66);
+function makeKey(label, side, dx, z, action, w = 0.1, d = 0.05) {
+  const c = document.createElement('canvas'); c.width = Math.round(w * 2560); c.height = Math.round(d * 2560);
+  const g = c.getContext('2d'), W = c.width, H = c.height;
+  g.fillStyle = '#2c2f36'; g.fillRect(0, 0, W, H);
+  g.fillStyle = '#e9e6df';
+  if (label === '◀' || label === '▶') {
+    const s = Math.min(W, H) * 0.28, dir = label === '◀' ? -1 : 1;
+    g.beginPath(); g.moveTo(W / 2 + dir * s, H / 2); g.lineTo(W / 2 - dir * s * 0.8, H / 2 - s); g.lineTo(W / 2 - dir * s * 0.8, H / 2 + s);
+    g.closePath(); g.fill();
+  } else {
+    g.font = 'bold 44px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(label, W / 2, H / 2 + 2);
+  }
   const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
-  const side = new THREE.MeshStandardMaterial({ color:0x1f2126 });
+  const sideMat = new THREE.MeshStandardMaterial({ color:0x1f2126 });
   const top = new THREE.MeshStandardMaterial({ map:tex, roughness:.6, emissive:0xffffff, emissiveMap:tex, emissiveIntensity:.15 });
-  const k = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.018, 0.05), [side, side, top, side, side, side]);
-  k.position.set(x, 0.009, z); k.castShadow = true;
-  k.userData = { action, label, armed:true, baseY:0.009, topMat:top };
+  const k = new THREE.Mesh(new THREE.BoxGeometry(w, 0.018, d), [sideMat, sideMat, top, sideMat, sideMat, sideMat]);
+  k.position.set(0, 0.009, z); k.castShadow = true;
+  k.userData = { action, label, armed:true, baseY:0.009, side, dx, hw:w / 2 + 0.004, hd:d / 2 + 0.004 };
   table.add(k); keys.push(k);
   return k;
 }
-const KX = HALF + MARGIN + 0.09;
-makeKey('Next', KX, -0.12, () => nextPuzzle());
-makeKey('Solution', KX, -0.05, () => showSolution());
-makeKey('Hint', KX, 0.02, () => showHint());
-makeKey('Higher', KX, 0.1, () => adjustHeight(0.03));
-makeKey('Lower', KX, 0.165, () => adjustHeight(-0.03));
+// Right column
+makeKey('Next', 1, 0, -0.12, () => nextPuzzle());
+makeKey('Solution', 1, 0, -0.05, () => showSolution());
+makeKey('Hint', 1, 0, 0.02, () => showHint());
+makeKey('Higher', 1, 0, 0.1, () => adjustHeight(0.03));
+makeKey('Lower', 1, 0, 0.165, () => adjustHeight(-0.03));
+// Left column
+makeKey('◀', -1, -0.0275, -0.07, () => navBack(), 0.047, 0.07);
+makeKey('▶', -1, 0.0275, -0.07, () => navFwd(), 0.047, 0.07);
+makeKey('Board +', -1, 0, 0.1, () => applyScale(boardScale + SCALE_STEP, true));
+makeKey('Board −', -1, 0, 0.165, () => applyScale(boardScale - SCALE_STEP, true));
 
 function adjustHeight(d) {
   table.position.y = THREE.MathUtils.clamp(table.position.y + d, 0.5, 1.4);
   layoutLegs(); click(700);
 }
 
+/* ============================== Board scale ============================== */
+let boardScale = Number.isFinite(store.scale) ? store.scale : 1;
+function applyScale(s, sound = false) {
+  boardScale = THREE.MathUtils.clamp(Math.round(s * 20) / 20, SCALE_MIN, SCALE_MAX);
+  board.scale.setScalar(boardScale);
+  const half = (HALF + MARGIN) * boardScale;            // board edge from centre
+  tableW = 2 * (half + 0.218);
+  tableD = Math.max(0.72, 2 * half + 0.16);
+  tableTop.scale.set(tableW, 1, tableD);
+  layoutLegs();
+  for (const k of keys) k.position.x = k.userData.side * (half + 0.09) + k.userData.dx;
+  infoPanel.position.set(0, 0.23 + (boardScale - 1) * 0.08, -(half + 0.078));
+  store.scale = boardScale;
+  $('scale').value = boardScale;
+  $('scaleVal').textContent = `${Math.round(boardScale * 100)}%`;
+  if (sound) click(700);
+}
+$('scale').addEventListener('input', e => applyScale(+e.target.value));
+applyScale(boardScale);
+
+/* ============================== Move navigation ============================== */
+let navBusy = false;
+const canNav = () => ['play', 'solved', 'shown'].includes(P.state) && !navBusy && !held;
+
+function showView() {
+  const { fen, move } = P.line[P.view];
+  const c = new Chess(fen);
+  syncPieces(c);
+  move ? markLast(move) : hlLast.forEach(h => h.visible = false);
+  markCheck(c);
+  hlHint.visible = false;
+  drawInfo();
+}
+function navBack() {
+  if (!canNav() || P.view <= 0) return;
+  P.view--;
+  showView(); click(600);
+}
+async function navFwd() {
+  if (!canNav() || atLive()) return;
+  navBusy = true;
+  const { fen, move } = P.line[P.view + 1];
+  P.view++;
+  await applyMoveMeshes(move);
+  markLast(move); markCheck(new Chess(fen));
+  navBusy = false;
+  drawInfo();
+}
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') navBack();
+  if (e.key === 'ArrowRight') navFwd();
+});
+
 /* ============================== Puzzle flow ============================== */
 let loadToken = 0;
 async function nextPuzzle() {
   if (P.state !== 'solved' && P.state !== 'shown' && P.failed && !P.submitted && P.data) { P.submitted = true; submitResult(P.data.puzzle.id, false); }
   const my = ++loadToken;
-  Object.assign(P, { state:'loading', failed:false, submitted:false, idx:0, ratingDiff:null });
+  Object.assign(P, { state:'loading', failed:false, submitted:false, idx:0, ratingDiff:null, line:[], view:0 });
+  navBusy = false;
   held && dropHeld(true);
   showDots([]); [hlBad, hlHover, hlHint, hlCheck].forEach(h => h.visible = false);
   drawInfo(); setStatus('Loading puzzle…');
@@ -520,6 +642,7 @@ async function nextPuzzle() {
   const sans = data.game.pgn.trim().split(/\s+/);
   for (const s of sans.slice(0, -1)) chess.move(s);
   P.data = data; P.chess = chess;
+  P.line = [{ fen:chess.fen(), move:null }]; P.view = 0;
   P.color = chess.turn() === 'w' ? 'b' : 'w';   // the player moves after the setup move
   board.rotation.y = P.color === 'w' ? 0 : Math.PI;
   drawBoard(P.color === 'b');
@@ -531,6 +654,7 @@ async function nextPuzzle() {
   await wait(700);
   if (my !== loadToken) return;
   const setup = chess.move(sans[sans.length - 1]);
+  pushLine(setup);
   await applyMoveMeshes(setup);
   markLast(setup); markCheck();
   P.state = 'play'; drawInfo();
@@ -538,8 +662,7 @@ async function nextPuzzle() {
 
 const wait = ms => new Promise(r => setTimeout(r, ms));
 function markLast(m) { placeHL(hlLast[0], m.from); placeHL(hlLast[1], m.to); }
-function markCheck() {
-  const c = P.chess;
+function markCheck(c = P.chess) {
   if (!c.inCheck()) { hlCheck.visible = false; return; }
   for (const row of c.board()) for (const s of row) if (s && s.type === 'k' && s.color === c.turn()) placeHL(hlCheck, s.square, .0009);
 }
@@ -550,7 +673,6 @@ async function playerMove(from, to, viaHand) {
   const expected = sol[P.idx];
   const legal = c.moves({ square:from, verbose:true }).filter(m => m.to === to);
   if (!legal.length) return false;
-  // promotion: use the solution's piece if it matches this from/to, else queen
   const promo = legal[0].promotion ? (expected?.slice(0, 4) === from + to && expected[4] ? expected[4] : 'q') : undefined;
   const m = c.move({ from, to, promotion:promo });
   hlHint.visible = false;
@@ -574,12 +696,14 @@ async function playerMove(from, to, viaHand) {
     return true;
   }
 
+  pushLine(m);
   P.idx++;
   if (P.idx >= sol.length) return finish();
   flash(P.failed ? 'Correct.' : 'Best move!', 1.2);
   await wait(450);
   const reply = sol[P.idx];
   const rm = c.move({ from:reply.slice(0, 2), to:reply.slice(2, 4), promotion:reply[4] });
+  pushLine(rm);
   await applyMoveMeshes(rm);
   markLast(rm); markCheck();
   P.idx++;
@@ -595,27 +719,32 @@ async function finish() {
     P.ratingDiff = await submitResult(P.data.puzzle.id, !P.failed);
     drawInfo();
   }
-  flash(P.failed ? 'Done. Poke Next for another.' : 'Solved! Poke Next for another.', 30);
+  flash(P.failed ? 'Done. ◀ ▶ to review, Next for another.' : 'Solved! ◀ ▶ to review, Next for another.', 30);
   return true;
 }
 
 async function showSolution() {
-  if (P.state !== 'play') return;
+  if (P.state !== 'play' || navBusy) return;
   held && dropHeld(true);
-  P.state = 'shown'; drawInfo();
+  if (!atLive()) { P.view = P.line.length - 1; showView(); }
+  const my = loadToken;
+  P.state = 'shown'; navBusy = true; drawInfo();
   if (!P.submitted) { P.submitted = true; P.failed = true; submitResult(P.data.puzzle.id, false).then(d => { P.ratingDiff = d; drawInfo(); }); }
   const c = P.chess, sol = P.data.puzzle.solution;
   while (P.idx < sol.length) {
     const u = sol[P.idx++];
     const m = c.move({ from:u.slice(0, 2), to:u.slice(2, 4), promotion:u[4] });
+    pushLine(m);
     await applyMoveMeshes(m); markLast(m); markCheck();
     await wait(600);
+    if (my !== loadToken) return;
   }
-  flash('Poke Next for another puzzle.', 30);
+  navBusy = false;
+  flash('◀ ▶ to review, Next for another puzzle.', 30);
 }
 
 function showHint() {
-  if (P.state !== 'play') return;
+  if (P.state !== 'play' || !atLive()) return;
   placeHL(hlHint, P.data.puzzle.solution[P.idx].slice(0, 2), .0011);
   click(620);
 }
@@ -637,6 +766,7 @@ function pieceAt(local, radius) {
 
 function startHold(sq, local, source) {
   if (P.state !== 'play' || held) return false;
+  if (!atLive()) { flash('Reviewing. Poke ▶ to return to the puzzle.'); return false; }
   const piece = pieces.get(sq);
   held = { piece, from:sq, offset: local.clone().sub(piece.position), source };
   const c = piece.userData.color;
@@ -702,7 +832,6 @@ function updateHands() {
     }
     if (held?.source === st) moveHold(vLocal);
 
-    // poke keys with index tip (only when not pinching)
     if (!st.pinching) pokeKeys(vB, st);
   }
 }
@@ -711,14 +840,15 @@ const vKey = new THREE.Vector3();
 function pokeKeys(tipWorld, st) {
   table.worldToLocal(vKey.copy(tipWorld));
   for (const k of keys) {
+    const u = k.userData;
     const dx = vKey.x - k.position.x, dz = vKey.z - k.position.z;
-    const dy = vKey.y - (k.userData.baseY + 0.009);           // height of fingertip joint above key top
-    const inside = Math.abs(dx) < 0.055 && Math.abs(dz) < 0.03;
+    const dy = vKey.y - (u.baseY + 0.009);
+    const inside = Math.abs(dx) < u.hw && Math.abs(dz) < u.hd;
     const pressed = inside && dy < 0.012 && dy > -0.04;
     const near = inside && dy < 0.05 && dy > -0.04;
-    k.position.y = k.userData.baseY - (inside && dy < 0.012 ? 0.006 : 0);
-    if (pressed && k.userData.armed) { k.userData.armed = false; st.pokeKey = k; k.userData.action(); }
-    if (!near && st.pokeKey === k) { k.userData.armed = true; st.pokeKey = null; }
+    k.position.y = u.baseY - (inside && dy < 0.012 ? 0.006 : 0);
+    if (pressed && u.armed) { u.armed = false; st.pokeKey = k; u.action(); }
+    if (!near && st.pokeKey === k) { u.armed = true; st.pokeKey = null; }
   }
 }
 
@@ -781,7 +911,8 @@ function placeTableFromHead() {
   if (headDir.lengthSq() < 1e-4) headDir.set(0, 0, -1);
   headDir.normalize();
   const y = THREE.MathUtils.clamp(headPos.y - 0.55, 0.55, 1.3);
-  table.position.set(headPos.x + headDir.x * 0.42, y, headPos.z + headDir.z * 0.42);
+  const dist = 0.42 + (HALF + MARGIN) * (boardScale - 1);   // keep the near edge at the same reach
+  table.position.set(headPos.x + headDir.x * dist, y, headPos.z + headDir.z * dist);
   table.rotation.y = Math.atan2(-headDir.x, -headDir.z);
   layoutLegs();
   return true;
