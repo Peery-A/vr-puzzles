@@ -9,14 +9,16 @@
   * { box-sizing:border-box; }
   html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; overflow:hidden; }
   #c { position:fixed; inset:0; width:100%; height:100%; display:block; }
-  #ui { position:fixed; left:16px; top:16px; max-width:360px; background:rgba(20,22,26,.88); border:1px solid #2c2f36; border-radius:10px; padding:14px 16px; }
+  #ui { position:fixed; left:16px; top:16px; max-width:380px; max-height:calc(100% - 32px); overflow-y:auto; background:rgba(20,22,26,.88); border:1px solid #2c2f36; border-radius:10px; padding:14px 16px; }
   #ui h1 { font-size:17px; margin:0 0 6px; }
   #ui p { margin:6px 0; color:var(--mute); }
-  #user { color:var(--fg); }
+  #user, #comment { color:var(--fg); }
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px; }
   .row label { color:var(--mute); }
   input[type=range] { flex:1; min-width:120px; accent-color:var(--accent); }
+  input[type=text] { flex:1; min-width:150px; font:inherit; background:#2c2f36; color:var(--fg); border:1px solid #3a3e46; border-radius:7px; padding:7px 9px; }
   select { font:inherit; background:#2c2f36; color:var(--fg); border:1px solid #3a3e46; border-radius:7px; padding:6px 8px; }
+  #myStudies { flex:1; }
   button { font:inherit; border:0; border-radius:7px; padding:9px 14px; cursor:pointer; background:#2c2f36; color:var(--fg); }
   button.primary { background:var(--accent); color:#1b1408; font-weight:600; }
   button:disabled { opacity:.45; cursor:default; }
@@ -42,6 +44,19 @@
     <button id="vr" class="primary" disabled>Enter VR</button>
   </div>
   <div class="row">
+    <label for="mode">Mode</label>
+    <select id="mode">
+      <option value="puzzle">Puzzles</option>
+      <option value="study">Study</option>
+    </select>
+  </div>
+  <div class="row">
+    <input id="studyInput" type="text" placeholder="Study URL or ID" autocomplete="off" spellcheck="false">
+    <button id="studyLoad">Load study</button>
+  </div>
+  <div class="row"><select id="myStudies" hidden></select></div>
+  <p id="comment"></p>
+  <div class="row">
     <label for="scale">Board size</label>
     <input id="scale" type="range" min="0.7" max="1.6" step="0.05">
     <span id="scaleVal"></span>
@@ -56,14 +71,16 @@
       <option value="hardest">Hardest (+600)</option>
     </select>
   </div>
-  <p>In VR: pinch a piece to pick it up, release over a square to move. Poke the keys on the table with your index finger.</p>
-  <p>Keyboard: <kbd>WASD</kbd>/arrows move the cursor, <kbd>Space</kbd> pick up / place, <kbd>Esc</kbd> cancel, <kbd>Q</kbd> <kbd>E</kbd> step moves, <kbd>N</kbd> next, <kbd>H</kbd> hint, <kbd>X</kbd><kbd>X</kbd> solution, <kbd>L</kbd> level, <kbd>+</kbd> <kbd>−</kbd> board size, <kbd>PgUp</kbd> <kbd>PgDn</kbd> height, <kbd>R</kbd> re-place table. In VR the mouse moves the cursor; click to pick up / place, right-click to cancel, wheel steps moves.</p>
+  <p>Hands: pinch a piece to pick it up, release over a square to move. Poke the keys on the table with your index finger.</p>
+  <p>Controllers: point and hold the trigger to drag a piece; trigger on a key presses it. Grip grabs a piece at the controller tip. <kbd>A</kbd>/<kbd>X</kbd> hint, <kbd>B</kbd>/<kbd>Y</kbd> next, thumbstick left/right steps moves, up/down table height, thumbstick click re-places the table.</p>
+  <p>Keyboard: <kbd>WASD</kbd>/arrows move the cursor, <kbd>Space</kbd> pick up / place, <kbd>Esc</kbd> cancel, <kbd>Q</kbd> <kbd>E</kbd> step moves, <kbd>N</kbd> next, <kbd>H</kbd> hint, <kbd>X</kbd><kbd>X</kbd> solution, <kbd>L</kbd> level, <kbd>M</kbd> mode, <kbd>+</kbd> <kbd>−</kbd> board size, <kbd>PgUp</kbd> <kbd>PgDn</kbd> height, <kbd>R</kbd> re-place table. In VR the mouse moves the cursor; click to pick up / place, right-click to cancel, wheel steps moves.</p>
 </div>
 
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { Chess } from 'https://cdn.jsdelivr.net/npm/chess.js@1.4.0/+esm';
 
 /* ============================== Config ============================== */
@@ -75,6 +92,7 @@ const HALF = SQ * 4;
 const MM = SQ / 57;               // piece profiles are drawn in mm for a 57 mm tournament square
 const PINCH_ON = 0.022, PINCH_OFF = 0.04;
 const GRAB_RADIUS = 0.05;
+const CTRL_GRAB_RADIUS = 0.06;    // grip grab reach from the controller tip
 const SCALE_MIN = 0.7, SCALE_MAX = 1.6, SCALE_STEP = 0.1;
 const MOUSE_GAIN = 0.0004;        // board metres per pixel of mouse movement in VR
 
@@ -82,15 +100,21 @@ const MOUSE_GAIN = 0.0004;        // board metres per pixel of mouse movement in
 const $ = id => document.getElementById(id);
 const setStatus = t => { $('status').textContent = t; };
 
-/* ============================== Lichess auth (OAuth PKCE) ============================== */
-const store = {
-  get token() { try { return localStorage.getItem('lp_token'); } catch { return null; } },
-  set token(v) { try { v ? localStorage.setItem('lp_token', v) : localStorage.removeItem('lp_token'); } catch {} },
-  get scale() { try { return parseFloat(localStorage.getItem('lp_scale')); } catch { return NaN; } },
-  set scale(v) { try { localStorage.setItem('lp_scale', String(v)); } catch {} },
-  get diff() { try { return localStorage.getItem('lp_diff'); } catch { return null; } },
-  set diff(v) { try { localStorage.setItem('lp_diff', v); } catch {} },
+/* ============================== Storage ============================== */
+const ls = {
+  get: k => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, String(v)); } catch {} },
 };
+const store = {
+  get token() { return ls.get('lp_token'); },   set token(v) { ls.set('lp_token', v || null); },
+  get scale() { return parseFloat(ls.get('lp_scale')); }, set scale(v) { ls.set('lp_scale', v); },
+  get diff() { return ls.get('lp_diff'); },     set diff(v) { ls.set('lp_diff', v); },
+  get mode() { return ls.get('lp_mode'); },     set mode(v) { ls.set('lp_mode', v); },
+  get study() { return ls.get('lp_study'); },   set study(v) { ls.set('lp_study', v); },
+  get chapter() { return parseInt(ls.get('lp_chapter')) || 0; }, set chapter(v) { ls.set('lp_chapter', v); },
+};
+
+/* ============================== Lichess auth (OAuth PKCE) ============================== */
 // Lichess applies the website difficulty setting only on lichess.org; API requests must pass it.
 const DIFFS = ['easiest', 'easier', 'normal', 'harder', 'hardest'];
 const DIFF_LABEL = { easiest:'Easiest −600', easier:'Easier −300', normal:'Normal', harder:'Harder +300', hardest:'Hardest +600' };
@@ -104,7 +128,7 @@ async function login() {
   sessionStorage.setItem('lp_verifier', verifier);
   sessionStorage.setItem('lp_state', state);
   const q = new URLSearchParams({ response_type:'code', client_id:CLIENT_ID, redirect_uri:REDIRECT,
-    code_challenge_method:'S256', code_challenge:challenge, scope:'puzzle:read puzzle:write', state });
+    code_challenge_method:'S256', code_challenge:challenge, scope:'puzzle:read puzzle:write study:read', state });
   location.href = `${LICHESS}/oauth?${q}`;
 }
 
@@ -121,15 +145,17 @@ async function finishLogin() {
   store.token = (await res.json()).access_token;
 }
 
-async function api(path, opts = {}) {
-  const headers = { Accept:'application/json', ...(opts.headers || {}) };
+async function lichess(path, accept, opts = {}) {
+  const headers = { Accept:accept, ...(opts.headers || {}) };
   if (store.token) headers.Authorization = `Bearer ${store.token}`;
   const res = await fetch(LICHESS + path, { ...opts, headers });
-  if (res.status === 401) { store.token = null; refreshUserUI(); throw new Error('Session expired. Log in again.'); }
+  if (res.status === 401) { store.token = null; account = null; refreshUserUI(); throw new Error('Session expired. Log in again.'); }
   if (res.status === 429) throw new Error('Rate limited by Lichess. Wait a minute.');
-  if (!res.ok) throw new Error(`Lichess error ${res.status}`);
-  return res.json();
+  if (!res.ok) { const e = new Error(`Lichess error ${res.status}`); e.status = res.status; throw e; }
+  return res;
 }
+const api = async (path, opts) => (await lichess(path, 'application/json', opts)).json();
+const apiText = async (path, accept) => (await lichess(path, accept)).text();
 
 let account = null;   // { username, rating }
 async function loadAccount() {
@@ -142,6 +168,7 @@ function refreshUserUI() {
   $('user').textContent = account ? `${account.username} · puzzle rating ${account.rating ?? '?'}` : 'Not logged in (puzzles will not be rated)';
   $('login').hidden = !!store.token;
   $('logout').hidden = !store.token;
+  if (!account) $('myStudies').hidden = true;
   drawInfo();
 }
 
@@ -169,6 +196,75 @@ async function submitResult(id, win) {
     return diff;
   } catch (e) { flash(e.message); return null; }
 }
+
+/* ============================== Studies ============================== */
+// A study is played chapter by chapter along its mainline. You play the chapter's orientation
+// colour; the other side's moves are played for you. Studies are never rated.
+let mode = store.mode === 'study' ? 'study' : 'puzzle';
+let study = null;   // { id, name, chapters:[{ id, name, pgn, orientation }], next, cur }
+
+const tag = (pgn, name) => pgn.match(new RegExp(`^\\[${name} "([^"]*)"\\]`, 'm'))?.[1] ?? null;
+const fenKey = f => f.split(' ').slice(0, 4).join(' ');
+function parseStudyRef(s) {
+  s = (s || '').trim();
+  const m = s.match(/study\/([A-Za-z0-9]{8})(?:\/([A-Za-z0-9]{8}))?/) || s.match(/^([A-Za-z0-9]{8})$/);
+  return m ? { id:m[1], chapter:m[2] || null } : null;
+}
+
+async function loadStudy(ref, chapterIdx = null) {
+  const r = typeof ref === 'string' ? parseStudyRef(ref) : ref;
+  if (!r) { setStatus('Enter a study URL such as lichess.org/study/AbCdEfGh.'); return false; }
+  setStatus('Loading study…');
+  let text;
+  try {
+    text = await apiText(`/api/study/${r.id}.pgn?comments=true&variations=false&clocks=false&orientation=true`, 'application/x-chess-pgn');
+  } catch (e) {
+    setStatus(e.status === 404 || e.status === 403
+      ? 'Study not found or private. For a private study, log out and log in again to grant study access.' : e.message);
+    return false;
+  }
+  const chapters = text.split(/\r?\n\s*\r?\n(?=\[Event )/).map(s => s.trim()).filter(Boolean).map(pgn => {
+    const url = tag(pgn, 'ChapterURL') || tag(pgn, 'Site') || '';
+    return { pgn, id: url.match(/study\/[A-Za-z0-9]{8}\/([A-Za-z0-9]{8})/)?.[1] ?? null,
+      name: tag(pgn, 'ChapterName') || tag(pgn, 'Event') || 'Chapter', orientation: tag(pgn, 'Orientation') };
+  });
+  if (!chapters.length) { setStatus('This study has no chapters.'); return false; }
+  const name = tag(chapters[0].pgn, 'StudyName') || (tag(chapters[0].pgn, 'Event') || '').split(':')[0].trim() || r.id;
+  let start = 0;
+  if (r.chapter) start = Math.max(0, chapters.findIndex(c => c.id === r.chapter));
+  else if (chapterIdx != null && chapterIdx < chapters.length) start = chapterIdx;
+  study = { id:r.id, name, chapters, next:start, cur:start };
+  store.study = r.id;
+  $('studyInput').value = `https://lichess.org/study/${r.id}`;
+  setStatus(`Study "${name}": ${chapters.length} chapter${chapters.length === 1 ? '' : 's'}.`);
+  return true;
+}
+
+async function loadMyStudies() {
+  const sel = $('myStudies');
+  sel.hidden = true;
+  if (!account) return;
+  try {
+    const text = await apiText(`/api/study/by/${account.username}`, 'application/x-ndjson');
+    const list = text.split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+    if (!list.length) return;
+    sel.replaceChildren(new Option('My studies…', ''), ...list.map(s => new Option(s.name, s.id)));
+    sel.hidden = false;
+  } catch {}
+}
+
+function setMode(m, fromVR = false) {
+  if (m === 'study' && !study) {
+    $('mode').value = mode;
+    flash(fromVR ? 'No study loaded. Load one on the page before entering VR.' : 'Load a study first.');
+    return;
+  }
+  mode = m; store.mode = m; $('mode').value = m;
+  if (m === 'study') study.next = study.cur;
+  if (fromVR) click(700);
+  nextItem();
+}
+const toggleMode = () => setMode(mode === 'puzzle' ? 'study' : 'puzzle', true);
 
 /* ============================== Three.js scene ============================== */
 const canvas = $('c');
@@ -451,6 +547,11 @@ function syncPieces(chess) {
     board.add(p); pieces.set(c.square, p);
   }
 }
+// Square of the piece that owns a mesh, or null
+function pieceSqOf(obj) {
+  for (const [s, p] of pieces) { let o = obj; while (o && o !== p) o = o.parent; if (o) return s; }
+  return null;
+}
 function animateTo(obj, target, dur = 0.32, lift = 0.03) {
   return new Promise(res => anims.push({ obj, from: obj.position.clone(), to: target.clone(), t: 0, dur, lift, onDone: res }));
 }
@@ -510,22 +611,44 @@ table.add(infoPanel);
 let flashMsg = null, flashUntil = 0;
 function flash(msg, secs = 2.5) { flashMsg = msg; flashUntil = performance.now() + secs * 1000; drawInfo(); setStatus(msg); }
 
-// line: positions from puzzle start. line[i] = { fen, move } where move led to fen. view = index shown on the board.
-const P = { data:null, chess:null, color:'w', idx:0, state:'idle', failed:false, submitted:false, ratingDiff:null, line:[], view:0 };
+// item: the current puzzle or study chapter. sol: UCI moves from the start position, both sides.
+// line: positions from the start. line[i] = { fen, move } where move led to fen. view = index shown on the board.
+const P = { item:null, sol:[], chess:null, color:'w', idx:0, state:'idle', failed:false, submitted:false, ratingDiff:null, line:[], view:0, comment:null };
 const atLive = () => !P.line.length || P.view === P.line.length - 1;
-function pushLine(m) { P.line.push({ fen:P.chess.fen(), move:m }); P.view = P.line.length - 1; }
+function setComment(fen = P.chess?.fen()) {
+  P.comment = (fen && P.item?.comments?.get(fenKey(fen))) || null;
+  $('comment').textContent = P.comment || '';
+}
+function pushLine(m) { P.line.push({ fen:P.chess.fen(), move:m }); P.view = P.line.length - 1; setComment(); }
+
+function wrapText(g, text, x, y, maxW, lh, maxLines) {
+  const words = text.replace(/\s+/g, ' ').split(' ');
+  let line = '', n = 0;
+  for (const w of words) {
+    const t = line ? line + ' ' + w : w;
+    if (g.measureText(t).width > maxW && line) {
+      if (n === maxLines - 1) { g.fillText(line + ' …', x, y + n * lh, maxW); return; }
+      g.fillText(line, x, y + n * lh); n++; line = w;
+    } else line = t;
+  }
+  if (line) g.fillText(line, x, y + n * lh, maxW);
+}
 
 function drawInfo() {
   const g = infoCanvas.getContext('2d'), W = 1024, H = 384;
+  const isStudy = P.item?.mode === 'study';
   g.clearRect(0, 0, W, H);
   g.fillStyle = 'rgba(18,20,24,.86)';
   g.beginPath(); g.roundRect(4, 4, W - 8, H - 8, 28); g.fill();
   g.textBaseline = 'top';
   g.fillStyle = '#e9e6df'; g.font = 'bold 54px system-ui,sans-serif';
-  let title = 'Loading puzzle…', col = '#e9e6df';
+  let title = isStudy || mode === 'study' ? 'Loading chapter…' : 'Loading puzzle…', col = '#e9e6df';
   if (P.state === 'play') title = `${P.color === 'w' ? 'White' : 'Black'} to move`;
   if (P.state === 'opp' || P.state === 'intro') title = 'Opponent moving…';
-  if (P.state === 'solved') { title = P.failed ? 'Puzzle complete' : 'Solved!'; col = P.failed ? '#d9a441' : '#5fb36b'; }
+  if (P.state === 'solved') {
+    title = isStudy ? 'Chapter complete' : P.failed ? 'Puzzle complete' : 'Solved!';
+    col = P.failed ? '#d9a441' : '#5fb36b';
+  }
   if (P.state === 'shown') { title = 'Solution shown'; col = '#d9a441'; }
   if (P.state === 'error') { title = 'Error'; col = '#d9574b'; }
   if (!atLive() && ['play', 'solved', 'shown'].includes(P.state)) {
@@ -534,22 +657,25 @@ function drawInfo() {
   }
   g.fillStyle = col; g.fillText(title, 40, 34);
   g.font = '34px system-ui,sans-serif'; g.fillStyle = '#c9c5bb';
-  if (P.data) {
-    const pz = P.data.puzzle;
-    g.fillText(`Puzzle ${pz.id} · rated ${pz.rating} · ${DIFF_LABEL[difficulty]}`, 40, 112, W - 80);
+  if (P.item) {
+    g.fillText(P.item.title1, 40, 112, W - 80);
     g.fillStyle = '#9a978f'; g.font = '28px system-ui,sans-serif';
-    g.fillText(pz.themes.slice(0, 5).join(' · '), 40, 160, W - 80);
+    g.fillText(P.item.title2, 40, 158, W - 80);
   }
-  g.font = '32px system-ui,sans-serif'; g.fillStyle = '#e9e6df';
-  let line = account ? `${account.username} · ${account.rating ?? '?'}` : 'Not logged in · unrated';
-  if (P.ratingDiff != null) line += `  (${P.ratingDiff >= 0 ? '+' : ''}${P.ratingDiff})`;
-  g.fillText(line, 40, 230);
+  if (isStudy) {
+    if (P.comment) { g.fillStyle = '#e9e6df'; g.font = '28px system-ui,sans-serif'; wrapText(g, P.comment, 40, 198, W - 80, 32, 3); }
+  } else {
+    g.font = '32px system-ui,sans-serif'; g.fillStyle = '#e9e6df';
+    let line = account ? `${account.username} · ${account.rating ?? '?'}` : 'Not logged in · unrated';
+    if (P.ratingDiff != null) line += `  (${P.ratingDiff >= 0 ? '+' : ''}${P.ratingDiff})`;
+    g.fillText(line, 40, 230);
+  }
   const msg = performance.now() < flashUntil ? flashMsg : null;
-  if (msg) { g.fillStyle = msg.startsWith('Wrong') ? '#ff7a6e' : '#f0c870'; g.font = 'bold 36px system-ui,sans-serif'; g.fillText(msg, 40, 296, W - 80); }
+  if (msg) { g.fillStyle = msg.startsWith('Wrong') ? '#ff7a6e' : '#f0c870'; g.font = 'bold 36px system-ui,sans-serif'; g.fillText(msg, 40, 304, W - 80); }
   infoTex.needsUpdate = true;
 }
 
-// Keys: flat raised buttons on the table either side of the board, poked from above.
+// Keys: flat raised buttons on the table either side of the board, poked from above or pointed at with a controller.
 // side: -1 left of board, +1 right. dx: offset within the column.
 const keys = [];
 function makeKey(label, side, dx, z, action, w = 0.1, d = 0.05) {
@@ -570,17 +696,18 @@ function makeKey(label, side, dx, z, action, w = 0.1, d = 0.05) {
   const top = new THREE.MeshStandardMaterial({ map:tex, roughness:.6, emissive:0xffffff, emissiveMap:tex, emissiveIntensity:.15 });
   const k = new THREE.Mesh(new THREE.BoxGeometry(w, 0.018, d), [sideMat, sideMat, top, sideMat, sideMat, sideMat]);
   k.position.set(0, 0.009, z); k.castShadow = true;
-  k.userData = { action, label, armed:true, baseY:0.009, side, dx, hw:w / 2 + 0.004, hd:d / 2 + 0.004 };
+  k.userData = { action, label, armed:true, baseY:0.009, side, dx, hw:w / 2 + 0.004, hd:d / 2 + 0.004, top };
   table.add(k); keys.push(k);
   return k;
 }
 // Right column
-makeKey('Next', 1, 0, -0.12, () => nextPuzzle());
+makeKey('Next', 1, 0, -0.12, () => nextItem());
 makeKey('Solution', 1, 0, -0.05, () => showSolution());
 makeKey('Hint', 1, 0, 0.02, () => showHint());
 makeKey('Higher', 1, 0, 0.1, () => adjustHeight(0.03));
 makeKey('Lower', 1, 0, 0.165, () => adjustHeight(-0.03));
 // Left column
+makeKey('Mode', -1, 0, -0.15, () => toggleMode());
 makeKey('◀', -1, -0.0275, -0.07, () => navBack(), 0.047, 0.07);
 makeKey('▶', -1, 0.0275, -0.07, () => navFwd(), 0.047, 0.07);
 makeKey('Level', -1, 0, 0.02, () => cycleLevel());
@@ -635,6 +762,7 @@ function showView() {
   move ? markLast(move) : hlLast.forEach(h => h.visible = false);
   markCheck(c);
   hlHint.visible = false;
+  setComment(fen);
   drawInfo();
 }
 function navBack() {
@@ -649,44 +777,85 @@ async function navFwd() {
   P.view++;
   await applyMoveMeshes(move);
   markLast(move); markCheck(new Chess(fen));
+  setComment(fen);
   navBusy = false;
   drawInfo();
 }
 
-/* ============================== Puzzle flow ============================== */
+/* ============================== Puzzle / chapter flow ============================== */
+const uci = m => m.from + m.to + (m.promotion || '');
+const fromUci = u => ({ from:u.slice(0, 2), to:u.slice(2, 4), promotion:u[4] });
+
+function puzzleItem(data) {
+  const c = new Chess();
+  for (const s of data.game.pgn.trim().split(/\s+/)) c.move(s);
+  const setup = c.history({ verbose:true }).at(-1);
+  const pz = data.puzzle;
+  return { mode:'puzzle', id:pz.id, startFen:setup.before, solution:[uci(setup), ...pz.solution],
+    color: setup.color === 'w' ? 'b' : 'w',
+    title1:`Puzzle ${pz.id} · rated ${pz.rating} · ${DIFF_LABEL[difficulty]}`, title2:pz.themes.slice(0, 5).join(' · '), comments:null };
+}
+
+function chapterItem(i) {
+  const ch = study.chapters[i];
+  const variant = tag(ch.pgn, 'Variant');
+  if (variant && !/^(standard|from position)$/i.test(variant)) throw new Error(`Chapter ${i + 1} is ${variant}. Only standard chess is supported. Next to skip.`);
+  const pgn = ch.pgn.replace(/\[%[^\]]*\]/g, '').replace(/\$\d+/g, '');   // drop arrows, circles, NAGs
+  const c = new Chess();
+  try { c.loadPgn(pgn); } catch { throw new Error(`Chapter ${i + 1} could not be read. Next to skip.`); }
+  const hist = c.history({ verbose:true });
+  const startFen = hist.length ? hist[0].before : c.fen();
+  const comments = new Map();
+  for (const { fen, comment } of c.getComments()) if (comment?.trim()) comments.set(fenKey(fen), comment.trim());
+  const color = ch.orientation ? (/^b/i.test(ch.orientation) ? 'b' : 'w') : new Chess(startFen).turn();
+  return { mode:'study', id:`${study.id}/${ch.id ?? i}`, startFen, solution:hist.map(uci), color,
+    title1:study.name, title2:`Chapter ${i + 1}/${study.chapters.length} · ${ch.name}`, comments };
+}
+
 let loadToken = 0;
-async function nextPuzzle() {
-  if (P.state !== 'solved' && P.state !== 'shown' && P.failed && !P.submitted && P.data) { P.submitted = true; submitResult(P.data.puzzle.id, false); }
+async function nextItem() {
   const my = ++loadToken;
-  Object.assign(P, { state:'loading', failed:false, submitted:false, idx:0, ratingDiff:null, line:[], view:0 });
+  Object.assign(P, { state:'loading', failed:false, submitted:false, idx:0, ratingDiff:null, line:[], view:0, comment:null });
+  $('comment').textContent = '';
   navBusy = false;
   held && dropHeld(true);
   showDots([]); [hlBad, hlHover, hlHint, hlCheck].forEach(h => h.visible = false);
-  drawInfo(); setStatus('Loading puzzle…');
-  let data;
-  try { data = await nextPuzzleData(); }
-  catch (e) { P.state = 'error'; flash(e.message, 8); return; }
+  drawInfo(); setStatus(mode === 'study' ? 'Loading chapter…' : 'Loading puzzle…');
+  let item;
+  try {
+    if (mode === 'study') {
+      if (!study) throw new Error('No study loaded. Load one on the page.');
+      const i = study.next;
+      study.cur = i; study.next = (i + 1) % study.chapters.length; store.chapter = i;
+      item = chapterItem(i);
+    } else item = puzzleItem(await nextPuzzleData());
+  } catch (e) { P.state = 'error'; P.item = null; flash(e.message, 8); return; }
   if (my !== loadToken) return;
 
-  const chess = new Chess();
-  const sans = data.game.pgn.trim().split(/\s+/);
-  for (const s of sans.slice(0, -1)) chess.move(s);
-  P.data = data; P.chess = chess;
+  const chess = new Chess(item.startFen);
+  Object.assign(P, { item, sol:item.solution, chess, color:item.color });
   P.line = [{ fen:chess.fen(), move:null }]; P.view = 0;
-  P.color = chess.turn() === 'w' ? 'b' : 'w';   // the player moves after the setup move
   board.rotation.y = P.color === 'w' ? 0 : Math.PI;
   drawBoard(P.color === 'b');
   syncPieces(chess);
   hlLast.forEach(h => h.visible = false);
+  markCheck();
+  setComment();
   P.state = 'intro'; drawInfo();
-  setStatus(`Puzzle ${data.puzzle.id} (${data.puzzle.rating}). You play ${P.color === 'w' ? 'White' : 'Black'}.`);
+  const side = P.color === 'w' ? 'White' : 'Black';
+  setStatus(item.mode === 'study' ? `${item.title1} · ${item.title2}. You play ${side}.` : `${item.title1}. You play ${side}.`);
 
-  await wait(700);
+  if (chess.turn() !== P.color && P.sol.length) {
+    await wait(700);
+    if (my !== loadToken) return;
+    const setup = chess.move(fromUci(P.sol[0]));
+    P.idx = 1;
+    pushLine(setup);
+    await applyMoveMeshes(setup);
+    markLast(setup); markCheck();
+  }
   if (my !== loadToken) return;
-  const setup = chess.move(sans[sans.length - 1]);
-  pushLine(setup);
-  await applyMoveMeshes(setup);
-  markLast(setup); markCheck();
+  if (P.idx >= P.sol.length) { finish(); return; }
   P.state = 'play'; drawInfo();
 }
 
@@ -696,10 +865,15 @@ function markCheck(c = P.chess) {
   if (!c.inCheck()) { hlCheck.visible = false; return; }
   for (const row of c.board()) for (const s of row) if (s && s.type === 'k' && s.color === c.turn()) placeHL(hlCheck, s.square, .0009);
 }
-const uci = m => m.from + m.to + (m.promotion || '');
+const rated = () => P.item?.mode === 'puzzle';
+function recordLoss() {
+  if (P.submitted) return;
+  P.submitted = true;
+  if (rated()) submitResult(P.item.id, false).then(d => { P.ratingDiff = d; drawInfo(); });
+}
 
 async function playerMove(from, to, viaHand) {
-  const c = P.chess, sol = P.data.puzzle.solution;
+  const c = P.chess, sol = P.sol;
   const expected = sol[P.idx];
   const legal = c.moves({ square:from, verbose:true }).filter(m => m.to === to);
   if (!legal.length) return false;
@@ -710,12 +884,12 @@ async function playerMove(from, to, viaHand) {
   await applyMoveMeshes(m, viaHand);
   markLast(m); markCheck();
 
-  const correct = uci(m) === expected || c.isCheckmate();
+  const correct = uci(m) === expected || (P.idx === sol.length - 1 && c.isCheckmate());
   if (!correct) {
     hlBad.visible = true; placeHL(hlBad, m.to, .001);
     click(180);
-    flash('Wrong move. Try again.');
-    if (!P.failed) { P.failed = true; P.submitted = true; submitResult(P.data.puzzle.id, false).then(d => { P.ratingDiff = d; drawInfo(); }); }
+    flash(rated() ? 'Wrong move. Try again.' : 'Wrong: not the study move. Try again.');
+    if (!P.failed) { P.failed = true; recordLoss(); }
     await wait(650);
     c.undo();
     syncPieces(c);
@@ -731,8 +905,7 @@ async function playerMove(from, to, viaHand) {
   if (P.idx >= sol.length) return finish();
   flash(P.failed ? 'Correct.' : 'Best move!', 1.2);
   await wait(450);
-  const reply = sol[P.idx];
-  const rm = c.move({ from:reply.slice(0, 2), to:reply.slice(2, 4), promotion:reply[4] });
+  const rm = c.move(fromUci(sol[P.idx]));
   pushLine(rm);
   await applyMoveMeshes(rm);
   markLast(rm); markCheck();
@@ -744,9 +917,15 @@ async function playerMove(from, to, viaHand) {
 
 async function finish() {
   P.state = 'solved'; click(880); drawInfo();
+  if (!rated()) {
+    const last = study && study.cur === study.chapters.length - 1;
+    flash(P.sol.length ? `Chapter done. ${last ? 'Last chapter: Next starts the study over.' : 'Next for the next chapter.'}`
+      : 'No moves in this chapter. Next to continue.', 30);
+    return true;
+  }
   if (!P.submitted) {
     P.submitted = true;
-    P.ratingDiff = await submitResult(P.data.puzzle.id, !P.failed);
+    P.ratingDiff = await submitResult(P.item.id, !P.failed);
     drawInfo();
   }
   flash(P.failed ? 'Done. ◀ ▶ to review, Next for another.' : 'Solved! ◀ ▶ to review, Next for another.', 30);
@@ -759,27 +938,27 @@ async function showSolution() {
   if (!atLive()) { P.view = P.line.length - 1; showView(); }
   const my = loadToken;
   P.state = 'shown'; navBusy = true; drawInfo();
-  if (!P.submitted) { P.submitted = true; P.failed = true; submitResult(P.data.puzzle.id, false).then(d => { P.ratingDiff = d; drawInfo(); }); }
-  const c = P.chess, sol = P.data.puzzle.solution;
+  P.failed = true; recordLoss();
+  const c = P.chess, sol = P.sol;
   while (P.idx < sol.length) {
-    const u = sol[P.idx++];
-    const m = c.move({ from:u.slice(0, 2), to:u.slice(2, 4), promotion:u[4] });
+    const m = c.move(fromUci(sol[P.idx++]));
     pushLine(m);
     await applyMoveMeshes(m); markLast(m); markCheck();
+    drawInfo();
     await wait(600);
     if (my !== loadToken) return;
   }
   navBusy = false;
-  flash('◀ ▶ to review, Next for another puzzle.', 30);
+  flash(`◀ ▶ to review, Next for another ${rated() ? 'puzzle' : 'chapter'}.`, 30);
 }
 
 function showHint() {
   if (P.state !== 'play' || !atLive()) return;
-  placeHL(hlHint, P.data.puzzle.solution[P.idx].slice(0, 2), .0011);
+  placeHL(hlHint, P.sol[P.idx].slice(0, 2), .0011);
   click(620);
 }
 
-/* ============================== Grabbing (hands + mouse) ============================== */
+/* ============================== Grabbing (hands, controllers, mouse) ============================== */
 let held = null;   // { piece, from, offset: Vector3 (board-local), source }
 
 function pieceAt(local, radius) {
@@ -796,7 +975,7 @@ function pieceAt(local, radius) {
 
 function startHold(sq, local, source) {
   if (P.state !== 'play' || held) return false;
-  if (!atLive()) { flash('Reviewing. Step forward (▶ or E) to return to the puzzle.'); return false; }
+  if (!atLive()) { flash('Reviewing. Step forward (▶, E or thumbstick right) to return to the position.'); return false; }
   const piece = pieces.get(sq);
   held = { piece, from:sq, offset: local.clone().sub(piece.position), source };
   const c = piece.userData.color;
@@ -882,14 +1061,9 @@ function pokeKeys(tipWorld, st) {
   }
 }
 
-// --- Mouse / touch fallback (desktop, not in VR)
+// --- Shared ray and board-plane helpers (mouse and controllers)
 const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
 const boardPlane = new THREE.Plane();
-const mouseSrc = {};
-function rayFromEvent(e) {
-  ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
-  ray.setFromCamera(ndc, camera);
-}
 function boardHit(height = 0) {
   board.updateMatrixWorld();
   const n = new THREE.Vector3(0, 1, 0), p = board.localToWorld(new THREE.Vector3(0, height, 0));
@@ -897,14 +1071,153 @@ function boardHit(height = 0) {
   const hit = new THREE.Vector3();
   return ray.ray.intersectPlane(boardPlane, hit) ? board.worldToLocal(hit) : null;
 }
+
+// --- Controllers: laser pointer from the controller tip.
+// Trigger: press a key or drag a piece along the board. Grip: grab a piece at the controller tip.
+// A/X hint, B/Y next, thumbstick left/right steps moves, up/down table height, thumbstick click re-places the table.
+const ctrlFactory = new XRControllerModelFactory();
+const rayGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+const rayMat = new THREE.LineBasicMaterial({ color:0xd9a441, transparent:true, opacity:.75 });
+const reticleGeo = new THREE.SphereGeometry(0.004, 12, 8);
+const reticleMat = new THREE.MeshBasicMaterial({ color:0xd9a441 });
+const mRot = new THREE.Matrix4(), vC = new THREE.Vector3(), vO = new THREE.Vector3();
+
+const controllers = [0, 1].map(i => {
+  const ctrl = renderer.xr.getController(i);
+  const grip = renderer.xr.getControllerGrip(i);
+  const model = ctrlFactory.createControllerModel(grip);
+  grip.add(model);
+  const line = new THREE.Line(rayGeo, rayMat);
+  ctrl.add(line);
+  const reticle = new THREE.Mesh(reticleGeo, reticleMat);
+  reticle.visible = false;
+  scene.add(ctrl, grip, reticle);
+  const st = { ctrl, grip, model, line, reticle, source:null, active:false, mode:null, aim:makeHL(0xffffff, .22),
+    prev:[], stickX:0, stickY:0 };
+  // Hand-tracked input sources also arrive here; those are handled by updateHands.
+  ctrl.addEventListener('connected', e => {
+    st.source = e.data;
+    st.active = !e.data.hand && e.data.targetRayMode === 'tracked-pointer';
+    st.prev = [];
+  });
+  ctrl.addEventListener('disconnected', () => {
+    if (held?.source === st) dropHeld(true);
+    Object.assign(st, { source:null, active:false, mode:null, prev:[] });
+  });
+  ctrl.addEventListener('selectstart', () => st.active && ctrlSelect(st));
+  ctrl.addEventListener('selectend', () => st.active && ctrlRelease(st, 'ray'));
+  ctrl.addEventListener('squeezestart', () => st.active && ctrlGrab(st));
+  ctrl.addEventListener('squeezeend', () => st.active && ctrlRelease(st, 'grip'));
+  return st;
+});
+
+function pulse(st, intensity, ms) {
+  try { st.source?.gamepad?.hapticActuators?.[0]?.pulse(intensity, ms); } catch {}
+}
+function aimRay(st) {
+  st.ctrl.updateMatrixWorld();
+  mRot.identity().extractRotation(st.ctrl.matrixWorld);
+  ray.ray.origin.setFromMatrixPosition(st.ctrl.matrixWorld);
+  ray.ray.direction.set(0, 0, -1).applyMatrix4(mRot);
+  ray.near = 0; ray.far = Infinity;
+}
+// What the controller points at: a key, one of your pieces (directly or via its square), and the hit point.
+function ctrlAim(st) {
+  aimRay(st);
+  const h = ray.intersectObjects([...keys, ...pieces.values(), boardMesh, tableTop], true)[0];
+  if (!h) return { dist:1 };
+  const res = { dist:h.distance, point:h.point };
+  if (keys.includes(h.object)) { res.key = h.object; return res; }
+  const sq = pieceSqOf(h.object) || localToSq(board.worldToLocal(h.point.clone()));
+  if (sq && pieces.get(sq)?.userData.color === P.color) res.sq = sq;
+  return res;
+}
+function pressKey(k) {
+  k.position.y = k.userData.baseY - 0.006;
+  setTimeout(() => { k.position.y = k.userData.baseY; }, 120);
+  k.userData.action();
+}
+function ctrlSelect(st) {
+  if (held) return;
+  const a = ctrlAim(st);
+  if (a.key) { pressKey(a.key); pulse(st, .5, 40); return; }
+  if (a.sq && startHold(a.sq, pieces.get(a.sq).position.clone(), st)) { st.mode = 'ray'; pulse(st, .4, 30); }
+}
+function ctrlGrab(st) {
+  if (held) return;
+  st.ctrl.getWorldPosition(vC);
+  board.worldToLocal(vC);
+  const sq = pieceAt(vC, CTRL_GRAB_RADIUS);
+  if (sq && startHold(sq, vC, st)) { st.mode = 'grip'; pulse(st, .4, 30); }
+}
+function ctrlRelease(st, how) {
+  if (held?.source !== st || st.mode !== how) return;
+  if (how === 'ray') held.piece.position.y = 0;
+  st.mode = null;
+  dropHeld();
+}
+function pollButtons(st) {
+  const gp = st.source?.gamepad;
+  if (!gp) return;
+  const edge = i => { const now = !!gp.buttons[i]?.pressed, was = !!st.prev[i]; st.prev[i] = now; return now && !was; };
+  if (edge(4)) showHint();      // A / X
+  if (edge(5)) nextItem();      // B / Y
+  if (edge(3)) recenter();      // thumbstick click
+  const x = gp.axes[2] ?? 0, y = gp.axes[3] ?? 0;
+  if (!st.stickX && Math.abs(x) > .7) { st.stickX = Math.sign(x); x < 0 ? navBack() : navFwd(); }
+  else if (Math.abs(x) < .3) st.stickX = 0;
+  if (!st.stickY && Math.abs(y) > .7) { st.stickY = Math.sign(y); adjustHeight(y < 0 ? 0.03 : -0.03); }
+  else if (Math.abs(y) < .3) st.stickY = 0;
+}
+
+function updateControllers() {
+  for (const k of keys) k.userData.top.emissiveIntensity = .15;
+  for (const st of controllers) {
+    const on = st.active && !!st.source;
+    st.model.visible = on;
+    st.line.visible = on;
+    if (!on) { st.reticle.visible = false; st.aim.visible = false; continue; }
+    pollButtons(st);
+    if (held?.source === st) {
+      st.aim.visible = false; st.reticle.visible = false;
+      if (st.mode === 'ray') {
+        aimRay(st);
+        const p = boardHit(0.03);
+        if (p) { p.y = 0.03; moveHold(p); }
+        held.piece.getWorldPosition(vC); st.ctrl.getWorldPosition(vO);
+        st.line.scale.z = vC.distanceTo(vO);
+      } else {
+        st.line.visible = false;
+        st.ctrl.getWorldPosition(vC); board.worldToLocal(vC);
+        moveHold(vC);
+      }
+      continue;
+    }
+    const a = ctrlAim(st);
+    st.line.scale.z = a.dist;
+    st.reticle.visible = !!a.point;
+    if (a.point) st.reticle.position.copy(a.point);
+    if (a.key) a.key.userData.top.emissiveIntensity = .45;
+    placeHL(st.aim, !held && P.state === 'play' && atLive() ? a.sq : null, .00085);
+  }
+}
+
+// --- Mouse / touch fallback (desktop, not in VR)
+const mouseSrc = {};
+function rayFromEvent(e) {
+  ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+}
 canvas.addEventListener('pointerdown', e => {
   if (renderer.xr.isPresenting) return;
   rayFromEvent(e);
   const kh = ray.intersectObjects(keys, false)[0];
   if (kh) { kh.object.userData.action(); return; }
-  const hits = ray.intersectObjects([...pieces.values()], true);
   let sq = null;
-  for (const h of hits) { for (const [s, p] of pieces) { let o = h.object; while (o && o !== p) o = o.parent; if (o === p && p.userData.color === P.color) { sq = s; break; } } if (sq) break; }
+  for (const h of ray.intersectObjects([...pieces.values()], true)) {
+    const s = pieceSqOf(h.object);
+    if (s && pieces.get(s).userData.color === P.color) { sq = s; break; }
+  }
   if (sq && startHold(sq, pieces.get(sq).position.clone(), mouseSrc)) { orbit.enabled = false; canvas.setPointerCapture(e.pointerId); }
 });
 canvas.addEventListener('pointermove', e => {
@@ -972,7 +1285,7 @@ function cursorCancel() { if (held?.source === cur.src) dropHeld(true); }
 function keyHint() {
   if (P.state !== 'play' || !atLive()) return;
   showHint();
-  if (!held) { cur.pos.copy(sqToLocal(P.data.puzzle.solution[P.idx].slice(0, 2))); showCursor(); }
+  if (!held) { cur.pos.copy(sqToLocal(P.sol[P.idx].slice(0, 2))); showCursor(); }
 }
 
 // Solution records a loss, so the key needs a second press within 2.5 s.
@@ -981,7 +1294,7 @@ function keySolution() {
   if (P.state !== 'play') return;
   const t = performance.now();
   if (t - solArmed < 2500) { solArmed = 0; showSolution(); }
-  else { solArmed = t; flash('Press X again to show the solution (records a loss).'); }
+  else { solArmed = t; flash(rated() ? 'Press X again to show the solution (records a loss).' : 'Press X again to show the moves.'); }
 }
 
 function recenter() { if (renderer.xr.isPresenting) { placeOnStart = true; click(700); } }
@@ -990,7 +1303,7 @@ const CURSOR_KEYS = { arrowup:[0, 1], w:[0, 1], arrowdown:[0, -1], s:[0, -1], ar
 const ACTIONS = {
   ' ': cursorSelect, enter: cursorSelect, escape: cursorCancel,
   q: navBack, ',': navBack, e: navFwd, '.': navFwd,
-  n: () => nextPuzzle(), h: keyHint, x: keySolution, l: cycleLevel,
+  n: () => nextItem(), h: keyHint, x: keySolution, l: cycleLevel, m: toggleMode,
   '=': () => applyScale(boardScale + SCALE_STEP, true), '+': () => applyScale(boardScale + SCALE_STEP, true),
   '-': () => applyScale(boardScale - SCALE_STEP, true), '_': () => applyScale(boardScale - SCALE_STEP, true),
   pageup: () => adjustHeight(0.03), pagedown: () => adjustHeight(-0.03),
@@ -1075,7 +1388,7 @@ let lastInfo = 0;
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (placeOnStart && renderer.xr.isPresenting && placeTableFromHead()) placeOnStart = false;
-  if (renderer.xr.isPresenting) updateHands(); else orbit.update();
+  if (renderer.xr.isPresenting) { updateHands(); updateControllers(); } else orbit.update();
   stepAnims(dt);
   if (cur.active && (!held || held.source === cur.src)) showCursor();
   const now = performance.now();
@@ -1088,17 +1401,26 @@ $('login').onclick = () => login().catch(e => setStatus(e.message));
 $('logout').onclick = async () => {
   const t = store.token; store.token = null; account = null; queue = []; refreshUserUI();
   try { await fetch(`${LICHESS}/api/token`, { method:'DELETE', headers:{ Authorization:`Bearer ${t}` } }); } catch {}
-  nextPuzzle();
+  nextItem();
 };
+$('mode').addEventListener('change', e => setMode(e.target.value));
+const loadAndPlay = async ref => { if (await loadStudy(ref)) setMode('study'); };
+$('studyLoad').onclick = () => loadAndPlay($('studyInput').value);
+$('studyInput').addEventListener('keydown', e => { if (e.key === 'Enter') loadAndPlay($('studyInput').value); });
+$('myStudies').addEventListener('change', e => { if (e.target.value) loadAndPlay({ id:e.target.value, chapter:null }); });
 
 (async () => {
   drawBoard(false);
   try { await finishLogin(); } catch (e) { setStatus(e.message); }
   try { await loadAccount(); } catch (e) { setStatus(e.message); }
   refreshUserUI();
+  loadMyStudies();
+  if (store.study) await loadStudy({ id:store.study, chapter:null }, store.chapter);
+  if (mode === 'study' && !study) mode = 'puzzle';
+  $('mode').value = mode;
   if (navigator.xr && await navigator.xr.isSessionSupported('immersive-vr').catch(() => false)) $('vr').disabled = false;
   else $('vr').title = 'WebXR VR not available in this browser';
-  nextPuzzle();
+  nextItem();
 })();
 </script>
 </body>
