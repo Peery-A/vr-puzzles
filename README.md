@@ -23,7 +23,7 @@ Right of the board:
 | Next puzzle / chapter | Poke **Next** |
 | Hint | **Hint** highlights the piece to move (does not count as a fail) |
 | Show solution | **Solution** plays the answer and records a loss (puzzles only) |
-| Table height | **Higher** / **Lower**, 3 cm per poke |
+| Table height | **Higher** / **Lower**, 3 cm per poke. In couch view they move the board toward / away from your face. |
 
 Left of the board:
 
@@ -32,6 +32,7 @@ Left of the board:
 | Mode | **Mode** switches between puzzles and the loaded study |
 | Step through moves | **◀** / **▶**. Works during and after the puzzle. While reviewing, pieces are locked; step forward to the current position to keep playing. |
 | Difficulty | **Level** cycles Easiest (−600) → Easier (−300) → Normal → Harder (+300) → Hardest (+600). Applies from the next puzzle. Saved. |
+| Theme | **Theme** opens the theme menu on the board. Poke a theme to start it. See Themes below. |
 | Board size | **Board +** / **Board −**, 10% per poke, 70%–160%. Saved. |
 
 ## Controller controls
@@ -52,6 +53,28 @@ A laser points from each controller. The square under it highlights when it hold
 Releasing a piece off the board or on an illegal square returns it. Controllers vibrate on pick-up and key presses.
 
 Re-center: thumbstick click, hold the Meta button, press **R**, or exit and re-enter VR.
+
+## Themes
+
+Every theme on lichess.org/training/themes is available: Healthy mix, all phases (Opening, Middlegame, Endgame, Rook, Bishop, Pawn, Knight, Queen and Queen-and-Rook endgames), motifs, advanced tactics, mate-in-N, all named mate patterns, special moves, goals, lengths and origins. 74 in total.
+
+- In VR: poke **Theme** (or press **T**). A menu covers the board, 21 themes per page. Poke a theme, or point a controller and pull the trigger. **◀ Prev** / **Next ▶** turn pages; **Close** or **Esc** returns to the puzzle.
+- On the page: the **Theme** menu in the top-left panel.
+- Picking a theme starts a puzzle from it right away and switches out of Study mode. The theme and difficulty combine. The theme is saved.
+- Themed puzzles are rated the same as Healthy mix, as on lichess.org.
+- Narrow themes at extreme difficulties can run out. The panel says so; pick another theme or level.
+
+## Couch view
+
+Play lying down.
+
+1. Lie back and look up at where you want the board.
+2. Hold the Meta button until the view resets. With hands, use the hand-tracking recenter gesture.
+3. The board appears along your line of sight, tilted so you see it at the same angle as from a chair, near edge toward your chin. The table legs are hidden.
+
+The app checks where you are looking when the view resets. Looking more than 20° above level gives couch view; level or down gives the normal table on the floor. To go back, sit up and hold Meta again. Thumbstick click and **R** follow the same rule.
+
+In couch view **Higher** / **Lower** (and thumbstick up / down) move the board toward / away from your face.
 
 ## Studies
 
@@ -75,12 +98,13 @@ Sit at a desk with the headset on and play without reaching. An orange cursor ma
 |---|---|
 | W A S D / arrow keys | Move the cursor one square |
 | Space / Enter | Pick up the piece under the cursor; press again to place it |
-| Esc | Cancel the pick-up |
+| Esc | Cancel the pick-up, or close the theme menu |
 | Q / E (or , / .) | Step back / forward through the moves |
 | N | Next puzzle / chapter |
 | H | Hint; also jumps the cursor to the piece to move |
 | X, X | Show solution. Needs a second press within 2.5 s, since it records a loss. |
 | L | Cycle difficulty |
+| T | Open / close the theme menu. Cursor + Space picks a theme. |
 | M | Switch between puzzles and study |
 | + / − | Board size |
 | Page Up / Page Down | Table height |
@@ -108,7 +132,7 @@ Tournament Staunton proportions: king 1.7× the square height, base about 70% of
 
 ## Rating rules
 
-- Puzzles come from `/api/puzzle/batch/mix`; logged in, you only get puzzles you have not seen.
+- Puzzles come from `/api/puzzle/batch/{theme}` (`mix` for Healthy mix); logged in, you only get puzzles you have not seen. Results post back to the same theme.
 - Difficulty is set in the app, not on lichess.org. The website's puzzle difficulty setting does not apply to API requests. Offsets are relative to your puzzle rating. Default is Easiest.
 - The first wrong move records a loss immediately, as on lichess.org. You can keep playing to finish.
 - A clean solve records a win. Your new puzzle rating and the change show on the panel.
@@ -117,4 +141,4 @@ Tournament Staunton proportions: king 1.7× the square height, base about 70% of
 
 ## Desktop testing (no headset)
 
-The same page works on a PC: drag pieces with the mouse, orbit with drag on empty space, click the keys. All keyboard shortcuts above also work. The **Board size** slider, **Difficulty** and **Mode** menus, and study loader sit in the top-left panel.
+The same page works on a PC: drag pieces with the mouse, orbit with drag on empty space, click the keys. All keyboard shortcuts above also work. The **Board size** slider, **Difficulty**, **Theme** and **Mode** menus, and study loader sit in the top-left panel.
